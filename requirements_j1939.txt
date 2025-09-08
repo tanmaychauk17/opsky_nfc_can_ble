@@ -1,0 +1,11 @@
+can-j1939==2.0.12
+hexdump==3.3
+iniconfig==2.1.0
+numpy==2.3.2
+packaging==25.0
+pluggy==1.6.0
+Pygments==2.19.2
+pytest==8.4.2
+python-can==4.6.1
+typing_extensions==4.15.0
+wrapt==1.17.3
