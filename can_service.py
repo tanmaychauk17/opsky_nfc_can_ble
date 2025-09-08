@@ -83,7 +83,7 @@ class CANModule:
 async def main():
     can_module = CANModule()
     can_task = asyncio.create_task(can_module.start())
-   #can_receive_task = asyncio.create_task(can_module.listen_async())
+    can_receive_task = asyncio.create_task(can_module.listen_async())
     can_send_task = asyncio.create_task(can_module.send_message())
     await asyncio.gather(can_task, can_send_task)
 

@@ -33,7 +33,7 @@ class NFCModule:
                 print('NFC: Card detected:', [hex(i) for i in uid])
             else:
                 continue
-            time.sleep(1)
+            await asyncio.sleep(1)
 
     async def start(self):
         try:
