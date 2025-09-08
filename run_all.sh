@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# Start the ZeroMQ hub
+python3 zmqhub.py > zmqhub.log 2>&1 &
+
+# Wait a moment to ensure the hub is up
+sleep 2
+
+# Start the NFC service (system Python, outside venv)
+python3 nfc_service.py > nfc_service.log 2>&1 &
+
+# Start the CAN J1939 service (in venv, if needed)
+# source /path/to/venv/bin/activate
+./can_start.sh > can_j1939_service.log 2>&1 &
+
+wait

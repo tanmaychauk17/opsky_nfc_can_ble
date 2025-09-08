@@ -1,4 +1,12 @@
 
+# Global configuration
+SEND_INTERVAL = 1.0  # seconds
+PGN_VALUE = 0xFE8C
+SOURCE_ADDRESS = 0x03
+DEST_ADDRESS = 0xFF
+import zmq
+import zmq.asyncio
+
 # Refactored to match can_service.py async structure
 import asyncio
 import can
@@ -9,10 +17,40 @@ import time
 can_message_queue = asyncio.Queue()
 
 class CANModule:
-    def __init__(self):
+    def __init__(self, loop=None, send_interval=SEND_INTERVAL, pgn=PGN_VALUE, source_address=SOURCE_ADDRESS, dest_address=DEST_ADDRESS):
         self.ecu = None
         self.ca = None
         self.nfc_data_available = False
+        self.nfc_data = None
+        self.nfc_data_pending = False
+        self.send_interval = send_interval  # CAN send interval in seconds
+        self.pgn = pgn  # Configurable PGN
+        self.source_address = source_address  # Configurable source address
+        self.dest_address = dest_address      # Configurable destination address
+        self.loop = loop or asyncio.get_event_loop()
+        # ZeroMQ async context and subscriber for NFC data
+        self.ctx = zmq.asyncio.Context.instance()
+        self.sub_socket = self.ctx.socket(zmq.SUB)
+        from zmqhub import XPUB_ADDR
+        self.sub_socket.connect(XPUB_ADDR)
+        self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "nfc_data")
+        self.sub_socket.setsockopt(zmq.LINGER, 0)
+
+    async def listen_nfc_data(self):
+        print("[NFC ZMQ] Listening for NFC data...")
+        while True:
+            msg = await self.sub_socket.recv_string()
+            print(f"[NFC ZMQ] Received: {msg}")
+            try:
+                topic, payload = msg.split(" ", 1)
+                if topic != "nfc_data":
+                    print(f"[NFC ZMQ] Unexpected topic: {topic}")
+                    continue
+                self.nfc_data = payload  # Store latest NFC data (raw string or JSON)
+                self.nfc_data_pending = True  # Mark as pending to send
+            except Exception as e:
+                print(f"[NFC ZMQ] Error parsing message: {e}")
+                continue
 
     async def init_j1939(self, can_channel='can0', bustype='socketcan'):
         print("Initializing J1939 CAN bus...")
@@ -28,7 +66,7 @@ class CANModule:
                 manufacturer_code=666,
                 identity_number=1234567
             )
-            self.ca = j1939.ControllerApplication(name, 0x03)
+            self.ca = j1939.ControllerApplication(name, self.source_address)
             self.ecu = j1939.ElectronicControlUnit()
             self.ecu.connect(bustype=bustype, channel=can_channel)
             self.ecu.add_ca(controller_application=self.ca)
@@ -38,7 +76,9 @@ class CANModule:
             await asyncio.sleep(2)
             print("J1939: Initialization complete.")
         except Exception as e:
-            print(f"Error during J1939 initialization: {e}")
+            print(f"[CAN ERROR] Error during J1939 initialization: {e}")
+            self.ca = None
+            self.ecu = None
 
     def on_message_received(self, priority, pgn, source, timestamp, data):
         print(f"[J1939 RX] PGN: {hex(pgn)} Source: {hex(source)} Data: {data.hex()}")
@@ -46,25 +86,60 @@ class CANModule:
         # await can_message_queue.put((priority, pgn, source, timestamp, data))
 
     async def send_message(self):
+        # **** Uncomment the following lines to enable backoff on repeated CAN send failures: ****
+        # error_count = 0
+        # backoff_time = self.send_interval
         while True:
-            # Wait until CA is in NORMAL state (address claimed)
-            while self.ca.state != j1939.ControllerApplication.State.NORMAL:
-                print("Waiting for CA to claim address...")
-                await asyncio.sleep(1)
-            # Example PGN and data
-            pgn = 0xFE8C
-
-            data_blank = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-            data_nfc_data = bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
-
-            self.nfc_data_available
-            print(f"[J1939 TX] Sending PGN {hex(pgn)} broadcast...")
-            # For broadcast, dest = 0xFF, priority = 6
-            if self.nfc_data_available == 0:
-                self.ca.send_pgn(0, pgn, 0xFF, 6, list(data_blank))
-            else:
-                self.ca.send_pgn(0, pgn, 0xFF, 6, list(data_nfc_data))
-            await asyncio.sleep(1)
+            try:
+                # Wait until CA is in NORMAL state (address claimed)
+                if self.ca is None:
+                    print("[J1939] ControllerApplication not initialized. Attempting re-init...")
+                    await self.init_j1939()
+                    await asyncio.sleep(2)
+                    # error_count = 0  # Reset error count on re-init
+                    continue
+                while self.ca.state != j1939.ControllerApplication.State.NORMAL:
+                    print("Waiting for CA to claim address...")
+                    await asyncio.sleep(1)
+                pgn = self.pgn
+                if self.nfc_data_pending and self.nfc_data:
+                    try:
+                        import json
+                        nfc_payload = json.loads(self.nfc_data)
+                        if isinstance(nfc_payload, dict) and 'data' in nfc_payload:
+                            data_bytes = bytes(nfc_payload['data'])
+                        else:
+                            data_bytes = self.nfc_data.encode()
+                    except Exception:
+                        data_bytes = self.nfc_data.encode()
+                    # Ensure always 8 bytes: pad with zeros if needed
+                    if len(data_bytes) < 8:
+                        data_bytes = b'\x00' * (8 - len(data_bytes)) + data_bytes
+                    elif len(data_bytes) > 8:
+                        data_bytes = data_bytes[:8]
+                    print(f"[J1939 TX] Sending NFC data: {data_bytes}")
+                    self.ca.send_pgn(0, pgn, self.dest_address, 6, list(data_bytes))
+                    self.nfc_data_pending = False  # Only send once
+                    # error_count = 0  # Reset error count on success
+                    # backoff_time = self.send_interval
+                else:
+                    data_bytes = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                    print(f"[J1939 TX] Sending default data: {data_bytes}")
+                    self.ca.send_pgn(0, pgn, self.dest_address, 6, list(data_bytes))
+                    # error_count = 0
+                    # backoff_time = self.send_interval
+            except Exception as e:
+                print(f"[CAN ERROR] {e}. Re-initializing J1939...")
+                self.ca = None
+                self.ecu = None
+                # error_count += 1
+                # if error_count > 3:
+                #     backoff_time = min(30, self.send_interval * (2 ** (error_count - 3)))
+                #     print(f"[CAN BACKOFF] Too many errors, backing off for {backoff_time} seconds.")
+                # else:
+                #     backoff_time = self.send_interval
+            # await asyncio.sleep(backoff_time)  # Use backoff_time if enabled
+            await asyncio.sleep(self.send_interval)  # Default behavior
 
     async def listen_async(self):
         # Optionally process messages from queue
@@ -91,11 +166,13 @@ class CANModule:
 
 
 async def main():
-    can_module = CANModule()
+    loop = asyncio.get_event_loop()
+    can_module = CANModule(loop=loop, send_interval=SEND_INTERVAL, pgn=PGN_VALUE, source_address=SOURCE_ADDRESS, dest_address=DEST_ADDRESS)
     can_task = asyncio.create_task(can_module.start())
     can_receive_task = asyncio.create_task(can_module.listen_async())
     can_send_task = asyncio.create_task(can_module.send_message())
-    await asyncio.gather(can_task, can_receive_task, can_send_task)
+    nfc_task = asyncio.create_task(can_module.listen_nfc_data())
+    await asyncio.gather(can_task, can_receive_task, can_send_task, nfc_task)
 
 if __name__ == "__main__":
     try:
