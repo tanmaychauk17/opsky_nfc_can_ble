@@ -1,9 +1,12 @@
 
 # Global configuration
-SEND_INTERVAL = 1.0  # seconds
-PGN_VALUE = 0xFE8C
-SOURCE_ADDRESS = 0x03
-DEST_ADDRESS = 0xFF
+SEND_INTERVAL   = 1.0  # seconds
+PGN_VALUE       = 0x00DC
+SOURCE_ADDRESS  = 0xDC
+DEST_ADDRESS    = 0x19
+PRIORITY        = 6
+OPCODE_NFC_ID   = 0x0018
+
 import zmq
 import zmq.asyncio
 
@@ -112,20 +115,31 @@ class CANModule:
                             data_bytes = self.nfc_data.encode()
                     except Exception:
                         data_bytes = self.nfc_data.encode()
+
+                    # CAN tx data  = OPCODE FOR NFC (0x0018) + 6 bytes of NFC data
+                    CAN_Tx_data = bytearray(8)
+                    CAN_Tx_data[0] = ((OPCODE_NFC_ID >> 8) & 0xFF)
+                    CAN_Tx_data[1] = (OPCODE_NFC_ID & 0xFF)
+                    CAN_Tx_data[2:8] = data_bytes[:6] + b'\x00' * (6 - len(data_bytes))     #appending zeros if received length is smaller than 6 bytes
+                                                                                            #in case of DESFire and NTAG cards 7 bytes are received, only 6 being used
+
+                    '''
                     # Ensure always 8 bytes: pad with zeros if needed
                     if len(data_bytes) < 8:
                         data_bytes = b'\x00' * (8 - len(data_bytes)) + data_bytes
                     elif len(data_bytes) > 8:
                         data_bytes = data_bytes[:8]
-                    print(f"[J1939 TX] Sending NFC data: {data_bytes}")
-                    self.ca.send_pgn(0, pgn, self.dest_address, 6, list(data_bytes))
+                    '''
+                    print(f"[J1939 TX] Sending NFC data: {CAN_Tx_data}")
+                    self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data))
                     self.nfc_data_pending = False  # Only send once
                     # error_count = 0  # Reset error count on success
                     # backoff_time = self.send_interval
                 else:
-                    data_bytes = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-                    print(f"[J1939 TX] Sending default data: {data_bytes}")
-                    self.ca.send_pgn(0, pgn, self.dest_address, 6, list(data_bytes))
+                    print('.')
+                    #CAN_Tx_data = bytes([((OPCODE_NFC_ID >> 8) & 0xFF), (OPCODE_NFC_ID & 0xFF), 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                    #print(f"[J1939 TX] Sending default data: {CAN_Tx_data}")
+                    #self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data))
                     # error_count = 0
                     # backoff_time = self.send_interval
             except Exception as e:
