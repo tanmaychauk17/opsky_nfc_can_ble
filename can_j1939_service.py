@@ -120,7 +120,7 @@ class CANModule:
                     CAN_Tx_data = bytearray(8)
                     CAN_Tx_data[0] = ((OPCODE_NFC_ID >> 8) & 0xFF)
                     CAN_Tx_data[1] = (OPCODE_NFC_ID & 0xFF)
-                    CAN_Tx_data[2:8] = data_bytes[:6] + b'\x00' * (6 - len(data_bytes))     #appending zeros if received length is smaller than 6 bytes
+                    CAN_Tx_data[2:8] = data_bytes[:6] + b'\xFF' * (6 - len(data_bytes))     #appending '0xFF' zeros if received length is smaller than 6 bytes
                                                                                             #in case of DESFire and NTAG cards 7 bytes are received, only 6 being used
 
                     '''

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import os
 import time
+import math
 
 class NFCModule:
     def __init__(self, loop=None):
@@ -56,10 +57,38 @@ class NFCModule:
                     msg = f"nfc_data {payload}"
                     await self.pub_socket.send_string(msg)
                     print(f"[NFC PUB] Published: {msg}")
+#*******************************To be commented*************************************#
+                    '''
+                    block4 = self.pn532.ntag2xx_read_block(4)   #handling to be added if block is not found
+
+                    ndef_length = block4[1]
+                    print("NDEF length:",ndef_length)
+
+                    total_bytes = 2 + ndef_length
+                    total_blocks = math.ceil(total_bytes / 4) #need better approach to round off
+
+                    blocks = [block4]
+                    for i in range (1,total_blocks):
+                        block = self.pn532.ntag2xx_read_block(4 + i)
+                        if block:
+                            blocks.append(block)
+                        else:
+                            print("Failed to read block")
+
+                    raw_data = b''.join(blocks)
+                    payload = raw_data[2:2 + ndef_length]
+
+                    try:
+                        text = payload.decode('utf-8',errors='ignore')
+                        print("NDEF text:", text)
+                    except Exception as e:
+                        print("NDEF text: Error in payload")
+                    '''
+#***********************************************************************************#
             except Exception as e:
                 print(f"[NFC ERROR] {e}. Re-initializing PN532...")
                 self.init_pn532()
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
     async def start(self):
         try:
