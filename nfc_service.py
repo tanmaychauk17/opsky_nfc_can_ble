@@ -31,7 +31,7 @@ class NFCModule:
         self.ctx = zmq.asyncio.Context.instance()
         self.pub_socket = self.ctx.socket(zmq.PUB)
         # Replace with your actual XSUB address if different
-        from zmqhub import XPUB_ADDR
+        from zmqhub import XSUB_ADDR
         self.pub_socket.connect(XSUB_ADDR)
         self.pub_socket.setsockopt(zmq.LINGER, 0)
 

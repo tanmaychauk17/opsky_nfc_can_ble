@@ -153,11 +153,10 @@ class CANModule:
                         data_bytes = self.nfc_data.encode()
 
                     # CAN tx data  = OPCODE FOR NFC (0x0018) + 6 bytes of NFC data
-                    CAN_Tx_data = bytearray(8)
+                    CAN_Tx_data = bytearray(b'\xFF' * 8)
                     CAN_Tx_data[0] = ((OPCODE_NFC_ID >> 8) & 0xFF)
                     CAN_Tx_data[1] = (OPCODE_NFC_ID & 0xFF)
-                    CAN_Tx_data[2:7] = data_bytes[:6] + b'\xFF' * (6 - len(data_bytes))     #appending '0xFF' zeros if received length is smaller than 6 bytes
-                                                                                            #in case of DESFire and NTAG cards 7 bytes are received, only 6 being used
+                    CAN_Tx_data[2:8] = data_bytes[:6] + b'\xFF' * (6 - min(len(data_bytes), 6))
 
                     logger.info(f"[J1939 TX] Sending NFC data: {CAN_Tx_data}")
                     self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data))
