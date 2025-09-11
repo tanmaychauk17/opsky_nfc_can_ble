@@ -1,5 +1,6 @@
 import zmq
 import zmq.asyncio
+import logging
 """
 This example shows connecting to the PN532 and reading an M1
 type RFID tag
@@ -15,6 +16,13 @@ import os
 import time
 import math
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("nfc_service")
+
 class NFCModule:
     def __init__(self, loop=None):
         self.loop = loop or asyncio.get_event_loop()
@@ -23,7 +31,7 @@ class NFCModule:
         self.ctx = zmq.asyncio.Context.instance()
         self.pub_socket = self.ctx.socket(zmq.PUB)
         # Replace with your actual XSUB address if different
-        from zmqhub import XSUB_ADDR
+        from zmqhub import XPUB_ADDR
         self.pub_socket.connect(XSUB_ADDR)
         self.pub_socket.setsockopt(zmq.LINGER, 0)
 
@@ -31,18 +39,18 @@ class NFCModule:
         try:
             self.pn532 = PN532_UART(debug=False, reset=20)
             ic, ver, rev, support = self.pn532.get_firmware_version()
-            print('NFC: Found PN532 with firmware version: {0}.{1}'.format(ver, rev))
+            logger.info('NFC: Found PN532 with firmware version: %s.%s', ver, rev)
             self.pn532.SAM_configuration()
-            print ("NFC: Service Initialized....")
+            logger.info("NFC: Service Initialized....")
         except Exception as e:
-            print(f"[NFC ERROR] Failed to initialize PN532: {e}")
+            logger.error(f"[NFC ERROR] Failed to initialize PN532: {e}")
             self.pn532 = None
 
     async def listen_async(self):
         while True:
             try:
                 if self.pn532 is None:
-                    print("[NFC] Attempting to re-initialize PN532...")
+                    logger.warning("[NFC] Attempting to re-initialize PN532...")
                     self.init_pn532()
                     await asyncio.sleep(2)
                     continue
@@ -50,13 +58,13 @@ class NFCModule:
                 uid = self.pn532.read_passive_target(timeout=0.5)
                 print('.', end="")
                 if uid is not None:
-                    print('NFC: Card detected:', [hex(i) for i in uid])
+                    logger.info('NFC: Card detected: %s', [hex(i) for i in uid])
                     # Example: send UID as NFC data (customize as needed)
                     import json
                     payload = json.dumps({"data": list(uid)})
                     msg = f"nfc_data {payload}"
                     await self.pub_socket.send_string(msg)
-                    print(f"[NFC PUB] Published: {msg}")
+                    logger.info(f"[NFC PUB] Published: {msg}")
 #*******************************To be commented*************************************#
                     '''
                     block4 = self.pn532.ntag2xx_read_block(4)   #handling to be added if block is not found
@@ -86,7 +94,7 @@ class NFCModule:
                     '''
 #***********************************************************************************#
             except Exception as e:
-                print(f"[NFC ERROR] {e}. Re-initializing PN532...")
+                logger.error(f"[NFC ERROR] {e}. Re-initializing PN532...")
                 self.init_pn532()
             await asyncio.sleep(0.5)
 
@@ -94,7 +102,7 @@ class NFCModule:
         try:
             await self.listen_async()
         except KeyboardInterrupt:
-            print("NFC: Exiting NFC Module...")
+            logger.info("NFC: Exiting NFC Module...")
 
 
 async def main():
