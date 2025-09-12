@@ -1,0 +1,6 @@
+pyzmq>=24.0.1
+python-can>=4.1.0
+can-j1939>=2.0.12
+RPi.GPIO
+pn532
+zmqhub

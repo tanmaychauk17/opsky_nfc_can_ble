@@ -39,14 +39,23 @@ class NFCModule:
         try:
             self.pn532 = PN532_UART(debug=False, reset=20)
             ic, ver, rev, support = self.pn532.get_firmware_version()
-            logger.info('NFC: Found PN532 with firmware version: %s.%s', ver, rev)
+            logger.info('[NFC INIT]: Found PN532 with firmware version: %s.%s', ver, rev)
             self.pn532.SAM_configuration()
-            logger.info("NFC: Service Initialized....")
+            logger.info("[NFC INIT]: Service Initialized....")
         except Exception as e:
             logger.error(f"[NFC ERROR] Failed to initialize PN532: {e}")
             self.pn532 = None
 
     async def listen_async(self):
+        last_uid = None
+        card_present = False
+        first_seen = None
+        last_sent = 0
+        debounce_period = 5  # seconds
+        fast_interval = 1    # seconds (for first 5 seconds)
+        slow_interval = 5    # seconds (after debounce)
+        send_count = 0
+
         while True:
             try:
                 if self.pn532 is None:
@@ -54,65 +63,77 @@ class NFCModule:
                     self.init_pn532()
                     await asyncio.sleep(2)
                     continue
-                # Check if a card is available to read
+
                 uid = self.pn532.read_passive_target(timeout=0.5)
-                print('.', end="")
+                now = time.time()
+
                 if uid is not None:
-                    logger.info('NFC: Card detected: %s', [hex(i) for i in uid])
-                    # Example: send UID as NFC data (customize as needed)
-                    import json
-                    payload = json.dumps({"data": list(uid)})
-                    msg = f"nfc_data {payload}"
-                    await self.pub_socket.send_string(msg)
-                    logger.info(f"[NFC PUB] Published: {msg}")
-#*******************************To be commented*************************************#
-                    '''
-                    block4 = self.pn532.ntag2xx_read_block(4)   #handling to be added if block is not found
+                    if last_uid != uid:
+                        # New card detected
+                        last_uid = uid
+                        card_present = True
+                        first_seen = now
+                        last_sent = 0
+                        send_count = 0
 
-                    ndef_length = block4[1]
-                    print("NDEF length:",ndef_length)
-
-                    total_bytes = 2 + ndef_length
-                    total_blocks = math.ceil(total_bytes / 4) #need better approach to round off
-
-                    blocks = [block4]
-                    for i in range (1,total_blocks):
-                        block = self.pn532.ntag2xx_read_block(4 + i)
-                        if block:
-                            blocks.append(block)
+                    if card_present:
+                        # First 5 seconds: send every second
+                        if now - first_seen < debounce_period:
+                            if now - last_sent >= fast_interval:
+                                await self._send_uid(uid)
+                                last_sent = now
+                                send_count += 1
                         else:
-                            print("Failed to read block")
+                            # After 5 seconds: send every 5 seconds
+                            if now - last_sent >= slow_interval:
+                                await self._send_uid(uid)
+                                last_sent = now
+                else:
+                    # No card detected
+                    if card_present:
+                        # Card was just removed
+                        logger.info("[NFC] Card removed.")
+                        # Optionally notify removal:
+                        # await self._send_uid([])
+                        last_uid = None
+                        card_present = False
+                        first_seen = None
+                        last_sent = 0
+                        send_count = 0
 
-                    raw_data = b''.join(blocks)
-                    payload = raw_data[2:2 + ndef_length]
-
-                    try:
-                        text = payload.decode('utf-8',errors='ignore')
-                        print("NDEF text:", text)
-                    except Exception as e:
-                        print("NDEF text: Error in payload")
-                    '''
-#***********************************************************************************#
             except Exception as e:
                 logger.error(f"[NFC ERROR] {e}. Re-initializing PN532...")
                 self.init_pn532()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
+
+    async def _send_uid(self, uid):
+        import json
+        payload = json.dumps({"data": list(uid)})
+        msg = f"nfc_data {payload}"
+        await self.pub_socket.send_string(msg)
+        logger.info(f"[NFC PUB] Published: {msg}")
 
     async def start(self):
         try:
             await self.listen_async()
         except KeyboardInterrupt:
             logger.info("NFC: Exiting NFC Module...")
+            await self.shutdown()
+    
+    async def shutdown(self):
+        self.pub_socket.close()
+        self.ctx.term()
 
 
 async def main():
     loop = asyncio.get_event_loop()
     nfc = NFCModule(loop=loop)
     nfc_task = asyncio.create_task(nfc.start())
-    await asyncio.gather(nfc_task)
+    try:
+        await asyncio.gather(nfc_task)
+    except KeyboardInterrupt:
+        logger.info("Exiting...")
+        await nfc.shutdown()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Exiting...")
+    asyncio.run(main())
