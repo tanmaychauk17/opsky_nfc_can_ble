@@ -5,7 +5,7 @@ This document describes how to set up and run the NFC-to-CAN J1939 bridge system
 ## Prerequisites
 
 - **Hardware:**
-  - Raspberry Pi (or compatible Linux SBC)
+  - Raspberry Pi 4B (or compatible Linux SBC)
   - PN532 NFC module (UART connection)
   - CAN interface (e.g., PiCAN2, USB-CAN, or similar)
 
@@ -13,6 +13,35 @@ This document describes how to set up and run the NFC-to-CAN J1939 bridge system
   - Python 3.7+
   - System CAN drivers (e.g., `socketcan`)
   - Required Python packages (see below)
+
+---
+
+## Raspberry Pi 4B Wiring
+
+### PN532 NFC HAT (UART mode)
+| PN532 Pin | Connects to Raspberry Pi 4B |
+|-----------|-----------------------------|
+| RXD       | GPIO14 (TXD, Pin 8)         |
+| TXD       | GPIO15 (RXD, Pin 10)        |
+| RST       | GPIO20 (Pin 38)             |
+| VCC       | 3.3V (Pin 1) or 5V (Pin 2/4)|
+| GND       | GND (Pin 6/9/etc.)          |
+
+### PiCAN2 (SPI CAN HAT)
+| PiCAN2 Pin | Connects to Raspberry Pi 4B |
+|------------|-----------------------------|
+| MOSI       | GPIO10 (Pin 19)             |
+| MISO       | GPIO9 (Pin 21)              |
+| SCLK       | GPIO11 (Pin 23)             |
+| CE0        | GPIO8 (Pin 24)              |
+| INT        | GPIO25 (Pin 22)             |
+| 5V         | 5V (Pin 2/4)                |
+| GND        | GND (Pin 6/9/etc.)          |
+
+**Note:** UART and SPI can be used simultaneously on the Pi 4B.  
+Enable both interfaces in `raspi-config`.
+
+---
 
 ## Installation
 
@@ -43,6 +72,8 @@ This document describes how to set up and run the NFC-to-CAN J1939 bridge system
      ifconfig can0
      ```
 
+---
+
 ## Configuration
 
 - **Global parameters** can be set in `can_j1939_service.py`:
@@ -54,6 +85,8 @@ This document describes how to set up and run the NFC-to-CAN J1939 bridge system
 - **NFC parameters** (in `nfc_service.py`):
   - UART reset pin (default: 20)
   - ZMQ XSUB address (from `zmqhub.py`)
+
+---
 
 ## Running the Services
 
@@ -79,11 +112,15 @@ This document describes how to set up and run the NFC-to-CAN J1939 bridge system
    - `run_all.sh`: Start all services
    - `kill_all.sh`: Stop all services
 
+---
+
 ## Data Flow
 
 1. NFC tag is scanned by PN532.
 2. `nfc_service.py` publishes UID as JSON on the `nfc_data` topic via ZMQ.
 3. `can_j1939_service.py` subscribes to `nfc_data`, receives UID, and sends it as a J1939 message over CAN.
+
+---
 
 ## Troubleshooting
 
@@ -92,10 +129,14 @@ This document describes how to set up and run the NFC-to-CAN J1939 bridge system
 - Use `dmesg` or `candump can0` for CAN debugging.
 - Review logs printed by each service for errors.
 
+---
+
 ## Customization
 
 - Edit global variables in `can_j1939_service.py` for CAN timing and addressing.
 - Edit `nfc_service.py` for NFC read interval or UART pin if needed.
+
+---
 
 ## Support
 
