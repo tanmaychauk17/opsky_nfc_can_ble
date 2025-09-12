@@ -49,12 +49,8 @@ class NFCModule:
     async def listen_async(self):
         last_uid = None
         card_present = False
-        first_seen = None
         last_sent = 0
-        debounce_period = 5  # seconds
-        fast_interval = 1    # seconds (for first 5 seconds)
-        slow_interval = 5    # seconds (after debounce)
-        send_count = 0
+        send_interval = 5  # seconds
 
         while True:
             try:
@@ -68,43 +64,27 @@ class NFCModule:
                 now = time.time()
 
                 if uid is not None:
-                    if last_uid != uid:
-                        # New card detected
-                        last_uid = uid
+                    if last_uid != tuple(uid):
+                        # New card detected, send immediately
+                        last_uid = tuple(uid)
                         card_present = True
-                        first_seen = now
-                        last_sent = 0
-                        send_count = 0
-
-                    if card_present:
-                        # First 5 seconds: send every second
-                        if now - first_seen < debounce_period:
-                            if now - last_sent >= fast_interval:
-                                await self._send_uid(uid)
-                                last_sent = now
-                                send_count += 1
-                        else:
-                            # After 5 seconds: send every 5 seconds
-                            if now - last_sent >= slow_interval:
-                                await self._send_uid(uid)
-                                last_sent = now
+                        await self._send_uid(uid)
+                        last_sent = now
+                    elif card_present and (now - last_sent >= send_interval):
+                        # Card still present, send every 5 seconds
+                        await self._send_uid(uid)
+                        last_sent = now
                 else:
-                    # No card detected
                     if card_present:
-                        # Card was just removed
                         logger.info("[NFC] Card removed.")
-                        # Optionally notify removal:
-                        # await self._send_uid([])
                         last_uid = None
                         card_present = False
-                        first_seen = None
                         last_sent = 0
-                        send_count = 0
 
             except Exception as e:
                 logger.error(f"[NFC ERROR] {e}. Re-initializing PN532...")
                 self.init_pn532()
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(1)
 
     async def _send_uid(self, uid):
         import json
