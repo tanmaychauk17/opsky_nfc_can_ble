@@ -84,7 +84,7 @@ class NFCModule:
             except Exception as e:
                 logger.error(f"[NFC ERROR] {e}. Re-initializing PN532...")
                 self.init_pn532()
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)  # Faster polling for better responsiveness
 
     async def _send_uid(self, uid):
         import json

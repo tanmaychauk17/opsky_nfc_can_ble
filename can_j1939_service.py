@@ -19,6 +19,7 @@ import time
 
 can_message_queue = asyncio.Queue()
 can_pub_queue = asyncio.Queue()
+ble_to_can_queue = asyncio.Queue()  # <-- Added queue for BLE-to-CAN messages
 
 # Configure logging
 logging.basicConfig(
@@ -31,17 +32,13 @@ class CANModule:
     def __init__(self, loop=None, send_interval=SEND_INTERVAL, pgn=PGN_VALUE, source_address=SOURCE_ADDRESS, dest_address=DEST_ADDRESS):
         self.ecu = None
         self.ca = None
-        self.nfc_data_available = False
         self.nfc_data = None
         self.nfc_data_pending = False
-        self.send_interval = send_interval  # CAN send interval in seconds
-        self.pgn = pgn  # Configurable PGN
-        self.source_address = source_address  # Configurable source address
-        self.dest_address = dest_address      # Configurable destination address
+        self.send_interval = send_interval
+        self.pgn = pgn
+        self.source_address = source_address
+        self.dest_address = dest_address
         self.loop = loop or asyncio.get_event_loop()
-        self.bleToCanData = None
-        self.bleToCanDataPending = None
-        # ZeroMQ async context and subscriber for NFC data
         self.ctx = zmq.asyncio.Context.instance()
         self.sub_socket = self.ctx.socket(zmq.SUB)
         self.pub_socket = self.ctx.socket(zmq.PUB)
@@ -64,19 +61,18 @@ class CANModule:
                     topic, payload = msg.split(" ", 1)
                     if topic == "nfc_data":
                         self.nfc_data = payload
-                        self.nfc_data_pending = True
+                        self.nfc_data_pending = True  # Only the latest NFC data is kept, preserving cyclicity
                     elif topic == "bleToCan":
                         logger.info("Received data over bleToCan topic")
-                        self.bleToCanData = payload
-                        self.bleToCanDataPending = True
+                        await ble_to_can_queue.put(payload)  # Queue every BLE-to-CAN message
                     else:
                         logger.warning(f"[NFC ZMQ] Unexpected topic: {topic}")
                 except Exception as e:
                     logger.error(f"[NFC ZMQ] Error parsing message: {e}")
             except Exception as e:
                 logger.error(f"[NFC ZMQ] Error receiving message: {e}")
-                await asyncio.sleep(1)  # Backoff before retry
-    
+                await asyncio.sleep(0.5)
+
     async def pub_worker(self):
         while True:
             msg = await can_pub_queue.get()
@@ -85,7 +81,7 @@ class CANModule:
                 logger.info("[CanToBle PUB] Published: %s", msg)
             except Exception as e:
                 logger.error(f"[CanToBle PUB] Error publishing: {e}")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
 
     async def init_j1939(self, can_channel='can0', bustype='socketcan'):
         logger.info("Initializing J1939 CAN bus...")
@@ -126,21 +122,19 @@ class CANModule:
             logger.error(f"[CanToBle PUB] Error queueing for publish: {e}")
 
     async def send_message(self):
-        # **** Uncomment the following lines to enable backoff on repeated CAN send failures: ****
-        # error_count = 0
         while True:
             try:
-                # Wait until CA is in NORMAL state (address claimed)
                 if self.ca is None:
                     logger.warning("[J1939] ControllerApplication not initialized. Attempting re-init...")
                     await self.init_j1939()
                     await asyncio.sleep(2)
-                    # error_count = 0  # Reset error count on re-init
                     continue
                 while self.ca.state != j1939.ControllerApplication.State.NORMAL:
                     logger.info("Waiting for CA to claim address...")
                     await asyncio.sleep(1)
                 pgn = self.pgn
+
+                # NFC data sending (preserves cyclicity, not queued)
                 if self.nfc_data_pending and self.nfc_data:
                     try:
                         import json
@@ -152,7 +146,6 @@ class CANModule:
                     except Exception:
                         data_bytes = self.nfc_data.encode()
 
-                    # CAN tx data  = OPCODE FOR NFC (0x0018) + 6 bytes of NFC data
                     CAN_Tx_data = bytearray(b'\xFF' * 8)
                     CAN_Tx_data[0] = ((OPCODE_NFC_ID >> 8) & 0xFF)
                     CAN_Tx_data[1] = (OPCODE_NFC_ID & 0xFF)
@@ -160,33 +153,31 @@ class CANModule:
 
                     logger.info(f"[J1939 TX] Sending NFC data: {CAN_Tx_data}")
                     self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data))
-                    self.nfc_data_pending = False  # Only send once
-                elif self.bleToCanDataPending and self.bleToCanData:
-                    try:
-                        import json
-                        bleToCan_payload = json.loads(self.bleToCanData)
-                        if isinstance(bleToCan_payload, dict) and 'BleToCan' in bleToCan_payload:
-                            data_bytes = bytes(bleToCan_payload['BleToCan'])
-                        else:
-                            data_bytes = self.bleToCanData.encode()
-                    except Exception:
-                        data_bytes = self.bleToCanData.encode()
+                    self.nfc_data_pending = False  # Only send once per new NFC data
 
-                    # CAN tx data  = OPCODE FOR NFC (0x0018) + 6 bytes of NFC data                   
+                # BLE-to-CAN data sending (queue-based, no loss)
+                try:
+                    ble_payload = await asyncio.wait_for(ble_to_can_queue.get(), timeout=0.01)
+                    import json
+                    bleToCan_payload = json.loads(ble_payload)
+                    if isinstance(bleToCan_payload, dict) and 'BleToCan' in bleToCan_payload:
+                        data_bytes = bytes(bleToCan_payload['BleToCan'])
+                    else:
+                        data_bytes = ble_payload.encode()
+
                     CAN_Tx_data = bytearray(b'\xFF' * 8)
                     CAN_Tx_data[0:len(data_bytes)] = data_bytes
 
                     logger.info(f"[J1939 TX] Sending BleToCan data: {CAN_Tx_data}")
                     self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data))
-                    self.bleToCanDataPending = False  # Only send once
+                except asyncio.TimeoutError:
+                    pass  # No BLE-to-CAN message this cycle
 
-                else:
-                    pass
             except Exception as e:
                 logger.error(f"[CAN ERROR] {e}. Re-initializing J1939...")
                 self.ca = None
                 self.ecu = None
-            await asyncio.sleep(self.send_interval)  # Default behavior
+            await asyncio.sleep(0.01)  # Fast loop for BLE-to-CAN, does not affect NFC cyclicity
 
     async def listen_async(self):
         # Optionally process messages from queue
