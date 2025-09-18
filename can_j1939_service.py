@@ -1,7 +1,7 @@
 import logging
 # Global configuration
 SEND_INTERVAL   = 1.0  # seconds
-PGN_VALUE       = 0x00DC
+PGN_VALUE       = 0x00EF
 SOURCE_ADDRESS  = 0xDC
 DEST_ADDRESS    = 0xFF
 PRIORITY        = 6
@@ -34,6 +34,7 @@ class CANModule:
         self.ca = None
         self.nfc_data = None
         self.nfc_data_pending = False
+        self.ble_status = None  # <-- Add class-level variable for BLE status
         self.send_interval = send_interval
         self.pgn = pgn
         self.source_address = source_address
@@ -47,12 +48,13 @@ class CANModule:
         self.sub_socket.connect(XPUB_ADDR)
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "nfc_data")
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "bleToCan")
+        self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "bleStatus")  # <-- Subscribe to BLE status
         self.sub_socket.setsockopt(zmq.LINGER, 0)
         self.pub_socket.connect(XSUB_ADDR)
         self.pub_socket.setsockopt(zmq.LINGER, 0)
 
     async def listen_sub_data(self):
-        logger.info("[NFC ZMQ] Listening for NFC data...")
+        logger.info("[NFC ZMQ] Listening for subscribed topics...")
         while True:
             try:
                 msg = await self.sub_socket.recv_string()
@@ -61,12 +63,27 @@ class CANModule:
                     topic, payload = msg.split(" ", 1)
                     if topic == "nfc_data":
                         self.nfc_data = payload
-                        self.nfc_data_pending = True  # Only the latest NFC data is kept, preserving cyclicity
-                    elif topic == "bleToCan":
+                        self.nfc_data_pending = True
+
+                    if topic == "bleToCan":
                         logger.info("Received data over bleToCan topic")
-                        await ble_to_can_queue.put(payload)  # Queue every BLE-to-CAN message
+                        await ble_to_can_queue.put(payload)
+
+                    if topic == "bleStatus":
+                        logger.info(f"BLE status update: {payload}")
+                        try:
+                            status_obj = json.loads(payload)
+                            if status_obj.get("status") == "connected":
+                                self.ble_status = True
+                            else:
+                                self.ble_status = False
+                        except Exception as e:
+                            logger.error(f"Failed to parse BLE status JSON: {e}")
+                            self.ble_status = False
+                    '''
                     else:
                         logger.warning(f"[NFC ZMQ] Unexpected topic: {topic}")
+                    '''
                 except Exception as e:
                     logger.error(f"[NFC ZMQ] Error parsing message: {e}")
             except Exception as e:
@@ -112,14 +129,23 @@ class CANModule:
             self.ecu = None
 
     def on_message_received(self, priority, pgn, source, timestamp, data):
+        # Always print/log the received message
         logger.info(f"[J1939 RX] PGN: {hex(pgn)} Source: {hex(source)} Data: {data.hex()}")
-        import json
-        payload = json.dumps({"data": list(data)})
-        msg = f"canToBle {payload}"
-        try:
-            self.loop.call_soon_threadsafe(can_pub_queue.put_nowait, msg)
-        except Exception as e:
-            logger.error(f"[CanToBle PUB] Error queueing for publish: {e}")
+
+        # Only push to pub queue if BLE is connected and data has FF F2 prefix
+        if (
+            #self.ble_status and
+            len(data) >= 2 and
+            data[0] == 0xFF and data[1] == 0xF2
+        ):
+            filtered_data = data[2:]
+            import json
+            payload = json.dumps({"data": list(filtered_data)})
+            msg = f"canToBle {payload}"
+            try:
+                self.loop.call_soon_threadsafe(can_pub_queue.put_nowait, msg)
+            except Exception as e:
+                logger.error(f"[CanToBle PUB] Error queueing for publish: {e}")
 
     async def send_message(self):
         while True:
@@ -146,10 +172,12 @@ class CANModule:
                     except Exception:
                         data_bytes = self.nfc_data.encode()
 
-                    CAN_Tx_data = bytearray(b'\xFF' * 8)
-                    CAN_Tx_data[0] = ((OPCODE_NFC_ID >> 8) & 0xFF)
-                    CAN_Tx_data[1] = (OPCODE_NFC_ID & 0xFF)
-                    CAN_Tx_data[2:8] = data_bytes[:6] + b'\xFF' * (6 - min(len(data_bytes), 6))
+                    CAN_Tx_data = bytearray(b'\xFF' * 10)
+                    CAN_Tx_data[0] = 0xFF
+                    CAN_Tx_data[1] = 0xF1
+                    CAN_Tx_data[2] = ((OPCODE_NFC_ID >> 8) & 0xFF)
+                    CAN_Tx_data[3] = (OPCODE_NFC_ID & 0xFF)
+                    CAN_Tx_data[4:10] = data_bytes[:6] + b'\xFF' * (6 - min(len(data_bytes), 6))
 
                     logger.info(f"[J1939 TX] Sending NFC data: {CAN_Tx_data}")
                     self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data))
@@ -165,8 +193,16 @@ class CANModule:
                     else:
                         data_bytes = ble_payload.encode()
 
-                    CAN_Tx_data = bytearray(b'\xFF' * 8)
-                    CAN_Tx_data[0:len(data_bytes)] = data_bytes
+                    if len(data_bytes) <= 6:
+                        CAN_Tx_data = bytearray(b'\xFF' * 8)
+                        CAN_Tx_data[0] = 0xFF
+                        CAN_Tx_data[1] = 0xF1
+                        CAN_Tx_data[2:2+len(data_bytes)] = data_bytes
+                    else:
+                        CAN_Tx_data = bytearray(b'\xFF' * (2 + len(data_bytes)))
+                        CAN_Tx_data[0] = 0xFF
+                        CAN_Tx_data[1] = 0xF1
+                        CAN_Tx_data[2:2+len(data_bytes)] = data_bytes
 
                     logger.info(f"[J1939 TX] Sending BleToCan data: {CAN_Tx_data}")
                     self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data))
