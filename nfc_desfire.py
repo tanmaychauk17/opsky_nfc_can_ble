@@ -85,8 +85,9 @@ class PN532Desfire:
             return None
 
         # Step 1: Send AuthenticateEV2First (7 bytes: 5 header + 2 data)
-        #apdu = [0x90, 0x71, 0x00, 0x00, 0x02, key_no, 0x00]    #required for ev2/ev3
-        apdu = [0x90, 0xAA, 0x00, 0x00, 0x01, 0x00, 0x00]    #required for desfire light
+        apdu = [0x90, 0x71, 0x00, 0x00, 0x02, key_no, 0x00]    #required for ev2/ev3
+        #apdu = [0x90, 0xAA, 0x00, 0x00, 0x01, 0x00, 0x00]    #required for desfire light
+
         print("AuthenticateEV2First APDU:", ' '.join(f'{b:02X}' for b in apdu))
         resp = self.send_apdu(apdu)
         if not resp or resp[-2:] != b'\x91\xAF':
@@ -172,6 +173,9 @@ class PN532Desfire:
         if resp and len(resp) >= 7:
             chip_type = resp[1]
             protocol_type = resp[6]
+            print("chip_type (hex):", hex(chip_type), "protocol_type (hex):", hex(protocol_type))
+            print("chip_type (dec):", chip_type, "protocol_type (dec):", protocol_type)
+            print("resp:", resp)
             if chip_type == 0x08 and protocol_type == 0x05:
                 print("DESFire Light card detected.")
                 return True
@@ -179,6 +183,39 @@ class PN532Desfire:
                 print("Not a DESFire Light card (GetVersion response does not match).")
         else:
             print("Failed to get card version or unexpected response.")
+        return False
+
+    def is_desfire_ev3(self):
+        """
+        Checks if the card is a DESFire EV3 card.
+        Returns True if EV3, False otherwise.
+        """
+        apdu = [0x90, 0x60, 0x00, 0x00, 0x00]  # GetVersion command
+        # Get the raw responses for each APDU
+        responses = []
+        resp = self.send_apdu(apdu)
+        while resp and resp[-2:] == b'\x91\xaf':
+            responses.append(resp)
+            resp = self.send_apdu([0x90, 0xAF, 0x00, 0x00, 0x00])
+        if resp and resp[-2:] == b'\x91\x00':
+            responses.append(resp)
+        if not responses:
+            print("Failed to get card version or unexpected response.")
+            return False
+        # The last response is the actual GetVersion version block
+        last_resp = responses[-1]
+        if len(last_resp) >= 16:
+            version = last_resp[:16]
+            chip_type = version[0]
+            protocol_type = version[9]
+            print("chip_type (hex):", hex(chip_type), "protocol_type (hex):", hex(protocol_type))
+            if chip_type == 0x04 and protocol_type == 0x63:
+                print("DESFire EV3 card detected.")
+                return True
+            else:
+                print("Not a DESFire EV3 card (GetVersion response does not match).")
+        else:
+            print("Final GetVersion response too short:", last_resp)
         return False
 
     def application_exists(self, aid):
@@ -210,11 +247,20 @@ def do_config(desfire):
     if not uid:
         return
     if not desfire.is_desfire_light():
-        print("This is not a DESFire Light card. Waiting for next card...")
+        print("This is not a DESFire Light card. Checking for EV3...")
+        if not desfire.is_desfire_ev3():
+            print("This is not a DESFire EV3 card. Waiting for next card...")
+            return
+
+    print("Selecting PICC (no application) before authenticating with PICC master key...")
+    desfire.select_application([0x00, 0x00, 0x00])
+
+    print("Authenticating with PICC master key before creating application...")
+    if not desfire.authenticate_aes(key_no=0x00, key=KEY):
+        print("PICC master key authentication failed! Aborting setup.")
         return
 
     print("Checking if application exists...")
-
     if desfire.application_exists(AID):
         print("Application already exists. Skipping creation.")
     else:
@@ -255,17 +301,19 @@ def do_tap(desfire):
             if not uid:
                 continue
             if not desfire.is_desfire_light():
-                print("This is not a DESFire Light card. Waiting for next card...")
-                continue
-            '''
+                print("This is not a DESFire Light card. Checking for EV3...")
+                if not desfire.is_desfire_ev3():
+                    print("This is not a DESFire EV3 card. Waiting for next card...")
+                    continue
+
             print("Checking if application exists...")
             if not desfire.application_exists(AID):
                 print("Application does not exist on this card. Waiting for next card...")
                 continue
-
+            
             print("Selecting application...")
             desfire.select_application(AID)
-            '''
+
             print("Authenticating...")
             desfire.authenticate_aes(key_no=0x00, key=KEY)
             '''
