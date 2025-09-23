@@ -92,8 +92,6 @@ class PN532Desfire:
             print("pycryptodome is required for authentication.")
             return None
 
-        #print(f"Using key_no={key_no}, key={key.hex()}")
-
         apdu = [0x90, 0xAA, 0x00, 0x00, 0x01, key_no, 0x00]
         print("AuthenticateLegacy APDU:", ' '.join(f'{b:02X}' for b in apdu))
         resp = self.send_apdu(apdu)
@@ -101,15 +99,16 @@ class PN532Desfire:
             print("Legacy Auth step 1 failed:", resp)
             return None
         rndB_enc = resp[:-2]
-        # CBC mode, IV is 16 bytes of 0x00 for the first decryption
-        cipher = AES.new(key, AES.MODE_CBC, iv=b'\x00'*16)
-        rndB = cipher.decrypt(bytes(rndB_enc))
         rndA = get_random_bytes(16)
-        rndB_rot = rndB[1:] + rndB[:1]
-        rndAB = rndA + rndB_rot
-        # CBC mode, IV is last block of previous ciphertext (rndB_enc)
-        cipher2 = AES.new(key, AES.MODE_CBC, iv=rndB_enc)
-        rndAB_enc = cipher2.encrypt(rndAB)
+        auth_flow = desfire_legacy_auth_flow(key, rndB_enc, rndA)
+        if auth_flow is None:
+            return None
+        rndB = auth_flow["rndB"]
+        rndB_rot = auth_flow["rndB_rot"]
+        rndAB = auth_flow["rndAB"]
+        rndAB_enc = auth_flow["rndAB_enc"]
+        response_to_send = auth_flow["response_to_send"]
+
         print("rndB_enc:", rndB_enc.hex())
         print("rndB (decrypted):", rndB.hex())
         print("rndA (random):", rndA.hex())
@@ -370,6 +369,56 @@ def do_change_key(desfire, old_key, new_key):
     print("Changing key...")
     desfire.change_key(0x00, old_key, new_key)
 
+def desfire_legacy_auth_flow(key, rndB_enc, rndA):
+    """
+    Simulates the DESFire legacy AES authentication flow from the point where the challenge is received.
+    Returns:
+        - rndB (decrypted challenge)
+        - rndB_rot (rotated challenge)
+        - rndAB (rndA + rndB_rot)
+        - rndAB_enc (encrypted response, 32 bytes)
+        - response_to_send (first 16 bytes to send to card)
+    """
+    cipher = AES.new(key, AES.MODE_CBC, iv=b'\x00'*16)
+    rndB = cipher.decrypt(rndB_enc)
+    rndB_rot = rndB[1:] + rndB[:1]
+    rndAB = rndA + rndB_rot
+    cipher2 = AES.new(key, AES.MODE_CBC, iv=rndB_enc)
+    rndAB_enc = cipher2.encrypt(rndAB)
+    response_to_send = rndAB_enc[:16]
+    return {
+        "rndB": rndB,
+        "rndB_rot": rndB_rot,
+        "rndAB": rndAB,
+        "rndAB_enc": rndAB_enc,
+        "response_to_send": response_to_send
+    }
+
+def desfire_mutual_auth_step(key, rndAB_enc, rndA):
+    """
+    Handles the mutual authentication step after sending the encrypted response to the card.
+    - Receives 16 bytes from the card (encrypted rotated rndA).
+    - Decrypts with AES-CBC, IV = last 16 bytes of rndAB_enc.
+    - Checks if result matches rndA rotated left by 1 byte.
+    Returns True if mutual authentication succeeds, and the session key.
+    """
+    # IV for this step is last 16 bytes of rndAB_enc
+    iv = rndAB_enc[16:32]
+    # Receive encrypted rotated rndA from card (simulate as input for unit test)
+    # card_response = ... (get from card in real flow)
+    # For unit test, you can pass card_response as argument
+    # Decrypt
+    cipher = AES.new(key, AES.MODE_CBC, iv=iv)
+    rotated_rndA = cipher.decrypt(card_response)
+    # Check
+    expected = rndA[1:] + rndA[:1]
+    if rotated_rndA != expected:
+        return False, None
+    # Session key: first 4 bytes of A, first 4 bytes of B, last 4 bytes of A, last 4 bytes of B
+    # You need to keep rndB from previous step
+    session_key = rndA[:4] + rndB[:4] + rndA[-4:] + rndB[-4:]
+    return True, session_key
+
 if __name__ == "__main__":
     import pn532.pn532 as nfc
     from pn532 import PN532_UART
@@ -398,3 +447,41 @@ if __name__ == "__main__":
         do_change_key(desfire, old_key, new_key)
     else:
         print("Unknown command. Use config, tap, or changekey.")
+
+def hex_bytes(data):
+    return ' '.join(f'{b:02X}' for b in data)
+
+if "--unittest-ref" in sys.argv:
+    # Reference values from your example
+    key = bytes.fromhex('00000000000000000000000000000000')
+    rndB_enc = bytes.fromhex('b969fdee56fd91fc9de6f6f213b8fd1e')
+    expected_rndB = bytes.fromhex('c05ddd714fd788a6b7b754f3c4d066e8')
+
+    rndA = bytes.fromhex('f44b26f5686f3a391cd38ebd10772281')
+    expected_rndB_rot = bytes.fromhex('5ddd714fd788a6b7b754f3c4d066e8c0')
+    expected_rndAB = bytes.fromhex('f44b26f5686f3a391cd38ebd107722815ddd714fd788a6b7b754f3c4d066e8c0')
+    expected_rndAB_enc = bytes.fromhex('36aad7df6e436ba08d18613830a70d5ad43e3d3f4a8d47541eee623a934e4774')
+    expected_response_to_send = expected_rndAB_enc[:16]
+
+    result = desfire_legacy_auth_flow(key, rndB_enc, rndA)
+    print("rndB_enc           ", hex_bytes(rndB_enc))
+    print("rndA               ", hex_bytes(rndA))
+
+#    print("rndB:              ", hex_bytes(result["rndB"]))
+    print("expected rndB:     ", hex_bytes(expected_rndB))
+#    print("rndB_rot:          ", hex_bytes(result["rndB_rot"]))
+    print("expected rndB_rot: ", hex_bytes(expected_rndB_rot))
+    print("rndAB:             ", hex_bytes(result["rndAB"]))
+    print("expected rndAB:    ", hex_bytes(expected_rndAB))
+    print("rndAB_enc:         ", hex_bytes(result["rndAB_enc"]))
+    print("expected rndAB_enc:", hex_bytes(expected_rndAB_enc))
+    print("response_to_send:  ", hex_bytes(result["response_to_send"]))
+    print("expected response: ", hex_bytes(expected_response_to_send))
+
+    assert result["rndB"] == expected_rndB, "rndB mismatch!"
+    assert result["rndB_rot"] == expected_rndB_rot, "rndB_rot mismatch!"
+    assert result["rndAB"] == expected_rndAB, "rndAB mismatch!"
+    assert result["rndAB_enc"] == expected_rndAB_enc, "rndAB_enc mismatch!"
+    assert result["response_to_send"] == expected_response_to_send, "response_to_send mismatch!"
+    print("Reference unit test passed!")
+    sys.exit(0)
