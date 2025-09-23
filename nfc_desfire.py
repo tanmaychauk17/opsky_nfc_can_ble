@@ -57,13 +57,19 @@ class PN532Desfire:
 
     def select_application(self, aid=[0x00, 0x00, 0x00]):
         # 5 header + 3 aid + 1 Le = 9 bytes
-        #apdu = [0x90, 0x5A, 0x00, 0x00, 0x03] + aid + [0x00]
-        apdu = [0x90, 0x5A, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00]
+        apdu = [0x90, 0x5A, 0x00, 0x00, 0x03] + aid + [0x00]
+        #apdu = [0x90, 0x5A, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00]
         return self.send_apdu(apdu)
 
     def create_application(self, aid, settings=0x0F, num_keys=1):
         # 5 header + 3 aid + 2 = 10 bytes
         apdu = [0x90, 0xCA, 0x00, 0x00, 0x05] + aid + [settings, num_keys]
+        return self.send_apdu(apdu)
+
+    def select_file(self, fid):
+        # 5 header + 1 fid + 1 Le = 9 bytes
+        #apdu = [0x90, 0x5A, 0x00, 0x00, 0x01] + fid + [0x00]
+        apdu = [0x90, 0x5A, 0x00, 0x00, 0x01, 0x00, 0x00]
         return self.send_apdu(apdu)
 
     def get_card_uid(self):
@@ -78,33 +84,43 @@ class PN532Desfire:
         except Exception as e:
             logger.error(f"Failed to read card UID: {e}")
             return None
+    
+    #def authenticate_aes(self, key_no=0x01, key=b'\x00'*16):
+    def authenticate_aes(self, key_no, key):
 
-    def authenticate_aes(self, key_no=0x00, key=b'\x00'*16):
         if AES is None:
             print("pycryptodome is required for authentication.")
             return None
 
-        # Step 1: Send AuthenticateEV2First (7 bytes: 5 header + 2 data)
-        apdu = [0x90, 0x71, 0x00, 0x00, 0x02, key_no, 0x00]    #required for ev2/ev3
-        #apdu = [0x90, 0xAA, 0x00, 0x00, 0x01, 0x00, 0x00]    #required for desfire light
+        #print(f"Using key_no={key_no}, key={key.hex()}")
 
-        print("AuthenticateEV2First APDU:", ' '.join(f'{b:02X}' for b in apdu))
+        apdu = [0x90, 0xAA, 0x00, 0x00, 0x01, key_no, 0x00]
+        print("AuthenticateLegacy APDU:", ' '.join(f'{b:02X}' for b in apdu))
         resp = self.send_apdu(apdu)
         if not resp or resp[-2:] != b'\x91\xAF':
-            print("Auth step 1 failed:", resp)
+            print("Legacy Auth step 1 failed:", resp)
             return None
         rndB_enc = resp[:-2]
-        cipher = AES.new(key, AES.MODE_ECB)
+        # CBC mode, IV is 16 bytes of 0x00 for the first decryption
+        cipher = AES.new(key, AES.MODE_CBC, iv=b'\x00'*16)
         rndB = cipher.decrypt(bytes(rndB_enc))
         rndA = get_random_bytes(16)
         rndB_rot = rndB[1:] + rndB[:1]
         rndAB = rndA + rndB_rot
-        rndAB_enc = cipher.encrypt(rndAB)
-        apdu2 = [0x90, 0xAF, 0x00, 0x00, 0x10] + list(rndAB_enc)
-        print("AuthenticateEV2Second APDU:", ' '.join(f'{b:02X}' for b in apdu2))
+        # CBC mode, IV is last block of previous ciphertext (rndB_enc)
+        cipher2 = AES.new(key, AES.MODE_CBC, iv=rndB_enc)
+        rndAB_enc = cipher2.encrypt(rndAB)
+        print("rndB_enc:", rndB_enc.hex())
+        print("rndB (decrypted):", rndB.hex())
+        print("rndA (random):", rndA.hex())
+        print("rndB_rot:", rndB_rot.hex())
+        print("rndAB (rndA + rndB_rot):", rndAB.hex())
+        print("rndAB_enc:", rndAB_enc.hex())
+        apdu2 = [0x90, 0xAF, 0x00, 0x00, 0x10] + list(rndAB_enc[:16])
+        print("AuthenticateLegacySecond APDU:", ' '.join(f'{b:02X}' for b in apdu2))
         resp2 = self.send_apdu(apdu2)
         if not resp2 or resp2[-2:] != b'\x91\x00':
-            print("Auth step 2 failed:", resp2)
+            print("Legacy Auth step 2 failed:", resp2)
             return None
         print("Authenticated!")
         return True
@@ -156,6 +172,7 @@ class PN532Desfire:
         if AES is None:
             print("pycryptodome is required for key change.")
             return None
+        
         if not self.authenticate_aes(key_no, old_key):
             print("Authentication with old key failed.")
             return None
@@ -225,7 +242,7 @@ class PN532Desfire:
             print("application_exists response (hex):", ' '.join(f'{b:02X}' for b in resp))
         else:
             print("application_exists response: None")
-        if not resp or len(resp) < 5:
+        if not resp or len(resp) < 3:
             print("Failed to get application IDs or no applications present.")
             return False
         aids = [resp[i:i+3] for i in range(0, len(resp)-2, 3)]
@@ -236,7 +253,6 @@ class PN532Desfire:
         return False
 
 def do_config(desfire):
-    # One-time setup: create app, file, write userid
     AID = [0xA1, 0xA2, 0xA3]
     FILE_NO = 1
     FILE_SIZE = 6
@@ -253,10 +269,13 @@ def do_config(desfire):
             return
 
     print("Selecting PICC (no application) before authenticating with PICC master key...")
-    desfire.select_application([0x00, 0x00, 0x00])
-
+    #desfire.select_application([0x00, 0x00, 0x00])
+    desfire.select_application([0xA3, 0xA2, 0xA1])
+    
+    KEY = bytes([0xAA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
     print("Authenticating with PICC master key before creating application...")
-    if not desfire.authenticate_aes(key_no=0x00, key=KEY):
+    if not desfire.authenticate_aes(key_no=0x01, key=KEY):
         print("PICC master key authentication failed! Aborting setup.")
         return
 
@@ -289,10 +308,13 @@ def do_config(desfire):
 
 def do_tap(desfire):
     # Tap and read UserID in a loop
-    AID = [0xA1, 0xA2, 0xA3]
+    #AID = [0xA1, 0xA2, 0xA3]
+    AID = [0xA3, 0xA2, 0xA1]
     FILE_NO = 1
     FILE_SIZE = 6
     KEY = b'\x00' * 16  # Use your real key if changed
+    KEY = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
 
     print("Waiting for cards. Press Ctrl+C to exit.")
     while True:
@@ -314,9 +336,12 @@ def do_tap(desfire):
             print("Selecting application...")
             desfire.select_application(AID)
 
+            print("Selecting file...")
+            desfire.select_file(0)
+
             print("Authenticating...")
-            desfire.authenticate_aes(key_no=0x00, key=KEY)
-            '''
+            desfire.authenticate_aes(key_no=0x03, key=KEY)
+
             print("Reading UserID...")
             resp = desfire.read_data(FILE_NO, 0, FILE_SIZE)
             if resp:
@@ -324,7 +349,7 @@ def do_tap(desfire):
                 print("UserID read from card:", userid)
             else:
                 print("Failed to read UserID.")
-            '''
+
             print("Remove card to continue...")
             # Wait for card removal before next loop
             while desfire.get_card_uid():
