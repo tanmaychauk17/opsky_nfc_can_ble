@@ -3,12 +3,14 @@ import itertools
 import sys
 import time
 
+
 import sys
 sys.path.append('./my_libs')
 
 try:
     from Crypto.Cipher import AES
     from Crypto.Random import get_random_bytes
+    from Crypto.Hash import CMAC
 except ImportError:
     AES = None
 
@@ -112,6 +114,7 @@ class PN532Desfire:
         rndAB_enc = auth_flow["rndAB_enc"]
         response_to_send = auth_flow["response_to_send"]
 
+        '''
         print("")
         print("rndB_enc:           ", hex_bytes(rndB_enc))
         print("rndB (decrypted):   ", hex_bytes(rndB))
@@ -120,10 +123,11 @@ class PN532Desfire:
         print("rndAB (rndA+B_rot): ", hex_bytes(rndAB))
         print("rndAB_enc:          ", hex_bytes(rndAB_enc))
         print("")
+        '''
         apdu2 = [0xAF] + list(rndAB_enc)
         #apdu2 = [0x90, 0xAF, 0x00, 0x00, 0x10] + list(rndAB_enc[:16])
 
-        print("AuthenticateLegacySecond APDU:", ' '.join(f'{b:02X}' for b in apdu2))
+        #print("AuthenticateLegacySecond APDU:", ' '.join(f'{b:02X}' for b in apdu2))
         resp2 = self.send_apdu(apdu2)
 
         # After you have rndA, rndB, rndAB_enc, and card_response
@@ -137,21 +141,17 @@ class PN532Desfire:
         cipher = AES.new(key, AES.MODE_CBC, iv=iv)
         rotated_rndA = cipher.decrypt(card_response)
         expected_rotated_rndA = rndA[1:] + rndA[:1]
-        print("rotated_rndA:         ", hex_bytes(rotated_rndA))
-        print("expected_rotated_rndA:", hex_bytes(expected_rotated_rndA))
+        #print("rotated_rndA:         ", hex_bytes(rotated_rndA))
+        #print("expected_rotated_rndA:", hex_bytes(expected_rotated_rndA))
         if rotated_rndA == expected_rotated_rndA:
             print("Mutual authentication succeeded!")
             session_key = rndA[:4] + rndB[:4] + rndA[-4:] + rndB[-4:]
             print("Session key:          ", hex_bytes(session_key))
+            return session_key
         else:
             print("Mutual authentication failed!")
-        '''
-        if not resp2 or resp2[-2:] != b'\x91\x00':
-            print("Legacy Auth step 2 failed:", hex_bytes(resp2))
             return None
-        print("Authenticated!")
-        '''
-        return True
+        
 
     def create_std_data_file(self, file_no, file_size, comm_settings=0x00, read_key=0, write_key=0, rw_key=0, change_key=0):
         # 5 header + 7 data = 12 bytes
@@ -203,8 +203,8 @@ class PN532Desfire:
             return None
 
         logger.info(f"Read successful from file {file_no}.")
-        # Optionally, preserve session_key for future secure messaging
-        self.last_session_key = session_key
+        logger.info(f"CMA verification to be added")
+
         return bytes(resp[1:length+1])
 
     def change_key(self, key_no, old_key, new_key):
@@ -229,9 +229,8 @@ class PN532Desfire:
         if resp and len(resp) >= 7:
             chip_type = resp[1]
             protocol_type = resp[6]
-            print("chip_type (hex):", hex(chip_type), "protocol_type (hex):", hex(protocol_type))
-            print("chip_type (dec):", chip_type, "protocol_type (dec):", protocol_type)
-            print("resp:", resp)
+#            print("chip_type (hex):", hex(chip_type), "protocol_type (hex):", hex(protocol_type))
+
             if chip_type == 0x08 and protocol_type == 0x05:
                 print("DESFire Light card detected.")
                 return True
@@ -301,11 +300,10 @@ def do_config(desfire):
     uid = desfire.get_card_uid()
     if not uid:
         return
-    if not desfire.is_desfire_light():
-        print("This is not a DESFire Light card. Checking for EV3...")
-        if not desfire.is_desfire_ev3():
-            print("This is not a DESFire EV3 card. Waiting for next card...")
-            return
+
+    if not desfire.is_desfire_ev3():
+        print("This is not a DESFire EV3 card. Waiting for next card...")
+        return
 
     print("Selecting PICC (no application) before authenticating with PICC master key...")
     #desfire.select_application([0x00, 0x00, 0x00])
@@ -375,11 +373,6 @@ def do_tap(desfire):
             
             print("Selecting application...")
             desfire.select_application(AID)
-
-            '''
-            print("Selecting file...")
-            desfire.select_file(0)
-            '''
 
             print("Authenticating...")
             #desfire.authenticate_aes(key_no=3, key=KEY)
