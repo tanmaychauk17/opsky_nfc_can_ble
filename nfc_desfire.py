@@ -22,6 +22,8 @@ def hex_bytes(data):
 class PN532Desfire:
     def __init__(self, pn532):
         self.pn532 = pn532
+        self.session_key = None
+        self.last_uid = None
 
     def in_data_exchange(self, data):
         flat_data = list(itertools.chain.from_iterable(
@@ -182,29 +184,29 @@ class PN532Desfire:
         ] + list(data_bytes)
         return self.send_apdu(apdu)
 
-    def read_data(self, file_no, offset, length, key_no, key):
+    def read_data(self, file_no, offset, length, key_no, key, uid):
         """
-        Authenticates with the provided key/key_no, then reads data from the file.
-        Preserves the session key for future use.
+        Always authenticate before reading data from the file.
         """
-
-        logger.info(f"Authenticating with key_no={key_no} for read_data...")
-        session_key = self.authenticate_aes(key_no=key_no, key=key)
-        if not session_key:
+        APP_AID = [0xA3, 0xA2, 0xA1]
+        self.select_application(APP_AID)
+        logger.info(f"Authenticating with key_no={key_no} before reading...")
+        self.session_key = self.authenticate_aes(key_no=key_no, key=key)
+        if not self.session_key:
             logger.error("Authentication failed. Cannot read data.")
             return None
 
         logger.info(f"Building read APDU for file_no={file_no}, offset={offset}, length={length}")
-
-        apdu = [0xBD, file_no,(offset & 0xFF) , (offset >> 8) & 0xFF, (offset >> 16) & 0xFF, (length & 0xFF) , (length >> 8) & 0xFF, (length >> 16) & 0xFF]
+        apdu = [
+            0xBD, file_no, (offset & 0xFF), (offset >> 8) & 0xFF, (offset >> 16) & 0xFF,
+            (length & 0xFF), (length >> 8) & 0xFF, (length >> 16) & 0xFF
+        ]
         resp = self.send_apdu(apdu)
         if not resp or len(resp) < 2 or resp[0] != 0x00:
             logger.error(f"Failed to read data from file {file_no}. Response: {resp}")
             return None
 
         logger.info(f"Read successful from file {file_no}.")
-        logger.info(f"CMA verification to be added")
-
         return bytes(resp[1:length+1])
 
     def change_key(self, key_no, old_key, new_key):
