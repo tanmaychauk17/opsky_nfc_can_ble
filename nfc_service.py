@@ -16,6 +16,8 @@ import os
 import time
 import math
 
+from nfc_desfire import PN532Desfire
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +36,9 @@ class NFCModule:
         from zmqhub import XSUB_ADDR
         self.pub_socket.connect(XSUB_ADDR)
         self.pub_socket.setsockopt(zmq.LINGER, 0)
+        self.desfire = PN532Desfire(self.pn532)
+        self.session_key = None
+        self.last_uid = None
 
     def init_pn532(self):
         try:
@@ -52,6 +57,12 @@ class NFCModule:
         last_sent = 0
         send_interval = 5  # seconds
 
+        FILE_NO = 0
+        FILE_SIZE = 6
+        KEY = b'\x00' * 16
+        KEY_NO = 0x03
+        APP_AID = [0xA3, 0xA2, 0xA1]
+
         while True:
             try:
                 if self.pn532 is None:
@@ -60,31 +71,27 @@ class NFCModule:
                     await asyncio.sleep(2)
                     continue
 
-                uid = self.pn532.read_passive_target(timeout=0.5)
                 now = time.time()
+                if (now - last_sent >= send_interval):
+                    uid = self.pn532.read_passive_target(timeout=0.5)
+                    if uid is not None:
+                        logger.info(f"[NFC] Detected card with UID: {uid}")
+                        data = self.desfire.read_data(FILE_NO, 0, FILE_SIZE, KEY_NO, KEY, uid=uid)
+                        if data:
+                            await self._send_uid(data)
+                            last_sent = now
+                    else:
+                        logger.debug("[NFC] No card detected.")
 
-                if uid is not None:
-                    if last_uid != tuple(uid):
-                        # New card detected, send immediately
-                        last_uid = tuple(uid)
-                        card_present = True
-                        await self._send_uid(uid)
-                        last_sent = now
-                    elif card_present and (now - last_sent >= send_interval):
-                        # Card still present, send every 5 seconds
-                        await self._send_uid(uid)
-                        last_sent = now
-                else:
-                    if card_present:
-                        logger.info("[NFC] Card removed.")
-                        last_uid = None
-                        card_present = False
-                        last_sent = 0
+                # Sleep only the remaining time to hit exactly 5 seconds
+                sleep_time = max(0, send_interval - (time.time() - last_sent))
+                await asyncio.sleep(min(0.1, sleep_time))
 
             except Exception as e:
                 logger.error(f"[NFC ERROR] {e}. Re-initializing PN532...")
                 self.init_pn532()
-            await asyncio.sleep(0.1)  # Faster polling for better responsiveness
+                await asyncio.sleep(0.1)
+            #await asyncio.sleep(0.1)  # Faster polling for better responsiveness
 
     async def _send_uid(self, uid):
         import json
