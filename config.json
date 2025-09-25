@@ -1,0 +1,7 @@
+{
+    "ble_adv_name": "OPSKY_DEVICE_1",
+    "nfc_permitted_uids": [
+        "opsky1",
+        "opsky2"
+    ]
+}
