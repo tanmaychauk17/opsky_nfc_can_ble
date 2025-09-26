@@ -111,6 +111,10 @@ Enable both interfaces in `raspi-config`.
 4. **(Optional) Use provided scripts:**
    - `run_all.sh`: Start all services
    - `kill_all.sh`: Stop all services
+   
+5. ** for now BLE test code is maintained separately in other repository https://github.com/sayu-agiliad/BLE_WIFi
+   - checkout to opsky_device_prototype branch
+   - execute opsky_simulator.py files after installing specified requirements
 
 ---
 
@@ -119,6 +123,7 @@ Enable both interfaces in `raspi-config`.
 1. NFC tag is scanned by PN532.
 2. `nfc_service.py` publishes UID as JSON on the `nfc_data` topic via ZMQ.
 3. `can_j1939_service.py` subscribes to `nfc_data`, receives UID, and sends it as a J1939 message over CAN.
+4. 'bleToCan' and 'canToBle' are subscribed by can_j1939_service.py and opsky_simulator.py and exchanges the respective data. 
 
 ---
 
