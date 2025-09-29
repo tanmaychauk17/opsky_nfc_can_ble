@@ -30,7 +30,7 @@ class NFCModule:
     def load_permitted_uids(self):
         import json
         try:
-            with open(os.path.join(os.path.dirname(__file__), '../config.json'), 'r') as f:
+            with open(os.path.join(os.path.dirname(__file__), 'config.json'), 'r') as f:
                 config = json.load(f)
             nfc_permitted_uids = config.get('nfc_permitted_uids', [])
             nfc_permitted_uids = [list(uid) if not isinstance(uid, list) else uid for uid in nfc_permitted_uids]
@@ -96,6 +96,7 @@ class NFCModule:
                     if uid is not None:
                         logger.info(f"[NFC] Detected card with UID: {uid}")
                         data = self.desfire.read_data(FILE_NO, 0, FILE_SIZE, KEY_NO, KEY, uid=uid)
+                        #logger.info(f"[NFC] ID on card: {data}")
                         if data:
                             # Check if data is bytes or list, else log warning
                             if not isinstance(data, (bytes, list)):

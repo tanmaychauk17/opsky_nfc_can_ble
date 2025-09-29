@@ -116,7 +116,7 @@ class PN532Desfire:
         rndAB_enc = auth_flow["rndAB_enc"]
         response_to_send = auth_flow["response_to_send"]
 
-        '''
+
         print("")
         print("rndB_enc:           ", hex_bytes(rndB_enc))
         print("rndB (decrypted):   ", hex_bytes(rndB))
@@ -125,7 +125,7 @@ class PN532Desfire:
         print("rndAB (rndA+B_rot): ", hex_bytes(rndAB))
         print("rndAB_enc:          ", hex_bytes(rndAB_enc))
         print("")
-        '''
+
         apdu2 = [0xAF] + list(rndAB_enc)
         #apdu2 = [0x90, 0xAF, 0x00, 0x00, 0x10] + list(rndAB_enc[:16])
 
@@ -143,8 +143,9 @@ class PN532Desfire:
         cipher = AES.new(key, AES.MODE_CBC, iv=iv)
         rotated_rndA = cipher.decrypt(card_response)
         expected_rotated_rndA = rndA[1:] + rndA[:1]
-        #print("rotated_rndA:         ", hex_bytes(rotated_rndA))
-        #print("expected_rotated_rndA:", hex_bytes(expected_rotated_rndA))
+        print("iv:                   ", hex_bytes(iv))
+        print("rotated_rndA:         ", hex_bytes(rotated_rndA))
+        print("expected_rotated_rndA:", hex_bytes(expected_rotated_rndA))
         if rotated_rndA == expected_rotated_rndA:
             print("Mutual authentication succeeded!")
             session_key = rndA[:4] + rndB[:4] + rndA[-4:] + rndB[-4:]

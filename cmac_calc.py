@@ -1,3 +1,13 @@
+import sys
+sys.path.append('./my_libs')
+
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Random import get_random_bytes
+    from Crypto.Hash import CMAC
+except ImportError:
+    AES = None
+
 class CMACSession:
     """
     Helper class to manage session IV and verify a sequence of responses.
@@ -47,6 +57,7 @@ def verify_card_response_cmac(session_key: bytes, session_iv: bytes, response: b
     logger.info(f"CMAC from card: {cmac_from_card.hex()}")
     # Prepare CMAC input: data + status
     cmac_input = data + status
+    cmac_input = status + data
     subkey1 = generate_subkey_1(session_key)
     subkey2 = generate_subkey_2(subkey1)
     cmac_calc, _ = cmac_calculate(cmac_input, session_key, session_iv, subkey1, subkey2)
@@ -160,34 +171,13 @@ def cmac_calculate(data: bytes, session_key: bytes, session_iv: bytes, subkey1: 
     logger.info(f"CMAC: {cmac.hex()}")
     return cmac, updated_iv
 
-def demo():
-    global session_key, session_iv, test_data
-    logger.info("==== CMAC/CRC Demo ====")
-    logger.info(f"Session Key: {session_key.hex()}")
-    logger.info(f"Session IV: {session_iv.hex()}")
-    logger.info(f"Test Data: {test_data.hex() if test_data else 'EMPTY'}")
-    subkey1 = generate_subkey_1(session_key)
-    subkey2 = generate_subkey_2(subkey1)
-    # CRC example
-    crc = crc32_custom(test_data)
-    logger.info(f"CRC32: {crc:08X} (little-endian: {crc.to_bytes(4, 'little').hex()})")
-    # CMAC example
-    cmac, new_iv = cmac_calculate(test_data, session_key, session_iv, subkey1, subkey2)
-    logger.info(f"CMAC (first 8 bytes): {cmac.hex()}")
-    logger.info(f"Updated IV: {new_iv.hex()}")
-
 if __name__ == "__main__":
-    # Example: set test_data here or from another module
-    test_data = b''  # Set to your test data for demo
-    demo()
-
     # --- Card response CMAC verification demo with session IV update ---
-    session_key_bytes = bytes.fromhex('8B47E99F74F6E97972AA90A903ECAE0C')
-    response_bytes = bytes.fromhex('006F70736B7931245A63E16D991701')
-    session_iv_bytes = bytes.fromhex('00000000000000000000000000000000')
-    logger.info("\n--- Card Response CMAC Verification (with session IV tracking) ---")
-    #cmac_session = CMACSession(session_key_bytes)
-    #cmac_session.verify_response(response_bytes)
+    session_key_bytes   = bytes.fromhex('0BC67C01B13F822DC0B7591F771726AF')
+    response_bytes      = bytes.fromhex('003132333435368564572DB0B05CC7')
+    session_iv_bytes    = bytes.fromhex('00000000000000000000000000000000')
+    #session_iv_bytes   = bytes.fromhex('38 AA 22 3E 9C 4F 00 78 C0 23 16 DC 0B C4 94 7B')
 
-    # To verify a sequence of responses, call cmac_session.verify_response(next_response_bytes) for each.
-    verify_card_response_cmac(session_key_bytes, session_iv_bytes, response_bytes)
+    logger.info("\n--- Card Response CMAC Verification (with session IV tracking) ---")
+    cmac_session = CMACSession(session_key_bytes)
+    cmac_session.verify_response(response_bytes)
