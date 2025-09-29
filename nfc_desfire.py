@@ -208,7 +208,14 @@ class PN532Desfire:
             return None
 
         logger.info(f"Read successful from file {file_no}.")
-        return bytes(resp[1:length+1])
+        # The response is: [status][data][cmac]
+        # resp[0] = status, resp[1:-8] = data, resp[-8:] = cmac
+        session_iv = b'\x00' * 16  # For first CMAC after authentication
+        if not desfire_cmac_verify(self.session_key, session_iv, resp):
+            logger.error("CMAC verification failed!")
+            return None
+        logger.info("CMAC verification succeeded.")
+        return bytes(resp[1:-8])  # Return only the data, not status/cmac
 
     def change_key(self, key_no, old_key, new_key):
         if AES is None:
@@ -458,6 +465,63 @@ def desfire_mutual_auth_step(key, rndAB_enc, rndA):
     # You need to keep rndB from previous step
     session_key = rndA[:4] + rndB[:4] + rndA[-4:] + rndB[-4:]
     return True, session_key
+
+def desfire_generate_subkeys(session_key):
+    """Generate CMAC subkeys K1 and K2."""
+    cipher = AES.new(session_key, AES.MODE_CBC, iv=b'\x00'*16)
+    L = cipher.encrypt(b'\x00'*16)
+    def shift(block):
+        out = bytearray(16)
+        carry = 0
+        for i in reversed(range(16)):
+            out[i] = ((block[i] << 1) & 0xFF) | carry
+            carry = (block[i] >> 7) & 1
+        return out, carry
+    K1, carry1 = shift(L)
+    if carry1:
+        K1[-1] ^= 0x87
+    K2, carry2 = shift(K1)
+    if carry2:
+        K2[-1] ^= 0x87
+    return bytes(K1), bytes(K2)
+
+def desfire_cmac_verify(session_key, session_iv, response):
+    if len(response) < 9:
+        logger.error("Response too short to contain status, data, and CMAC.")
+        return False
+    status = response[0:1]
+    data = response[1:-8]
+    cmac_from_card = response[-8:]
+    cmac_input = data + status
+    K1, K2 = desfire_generate_subkeys(session_key)
+    needs_padding = (len(cmac_input) == 0 or len(cmac_input) % 16 != 0)
+    pad_len = 16 - (len(cmac_input) % 16)
+    if pad_len == 16:
+        padded = cmac_input
+    else:
+        padded = cmac_input + b'\x80' + b'\x00' * (pad_len - 1)
+    last_block = bytearray(padded[-16:])
+    if needs_padding:
+        for i in range(16):
+            last_block[i] ^= K2[i]
+    else:
+        for i in range(16):
+            last_block[i] ^= K1[i]
+    padded = padded[:-16] + bytes(last_block)
+    cipher = AES.new(session_key, AES.MODE_CBC, session_iv)
+    encrypted = cipher.encrypt(padded)
+    cmac_calc = encrypted[-16:][:8]
+    logger.info(f"Session key: {session_key.hex().upper()}")
+    logger.info(f"Session IV: {session_iv.hex().upper()}")
+    logger.info(f"CMAC input (data+status): {cmac_input.hex().upper()}")
+    logger.info(f"CMAC from card: {cmac_from_card.hex().upper()}")
+    logger.info(f"CMAC calculated: {cmac_calc.hex().upper()}")
+    if cmac_calc == cmac_from_card:
+        logger.info("CMAC verification succeeded.")
+        return True
+    else:
+        logger.error("CMAC verification failed!")
+        return False
 
 if __name__ == "__main__":
     import pn532.pn532 as nfc
