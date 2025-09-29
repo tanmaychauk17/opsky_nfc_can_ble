@@ -379,9 +379,10 @@ def do_tap(desfire):
 
             print("Authenticating...")
             #desfire.authenticate_aes(key_no=3, key=KEY)
-
+            
+            dummy_uid = 0
             print("Reading UserID...")
-            resp = desfire.read_data(FILE_NO, 0, FILE_SIZE,key_no=3, key=KEY)
+            resp = desfire.read_data(FILE_NO, 0, FILE_SIZE,key_no=3, key=KEY,uid=dummy_uid)
             if resp:
                 userid = resp.decode('utf-8', errors='ignore')
                 print("UserID read from card:", userid)
