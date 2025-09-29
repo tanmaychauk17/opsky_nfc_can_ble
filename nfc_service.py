@@ -33,14 +33,26 @@ class NFCModule:
             with open(os.path.join(os.path.dirname(__file__), 'config.json'), 'r') as f:
                 config = json.load(f)
             nfc_permitted_uids = config.get('nfc_permitted_uids', [])
-            nfc_permitted_uids = [list(uid) if not isinstance(uid, list) else uid for uid in nfc_permitted_uids]
+            # No conversion needed, keep as strings
         except Exception as e:
             logger.error(f"[NFC CONFIG] Failed to load permitted UIDs: {e}")
             nfc_permitted_uids = []
         return nfc_permitted_uids
 
     def is_device_permitted(self, data):
-        return list(data) in self._nfc_permitted_uids
+        try:
+            # Convert bytes or list of ints to ASCII string
+            if isinstance(data, bytes):
+                data_str = data.decode(errors="ignore")
+            elif isinstance(data, list):
+                data_str = bytes(data).decode(errors="ignore")
+            else:
+                logger.warning(f"[NFC] Unexpected data type in is_device_permitted: {type(data)}")
+                return False
+            return data_str in self._nfc_permitted_uids
+        except Exception as e:
+            logger.error(f"[NFC] Error in is_device_permitted: {e}")
+            return False
 
     def __init__(self, loop=None):
         self.loop = loop or asyncio.get_event_loop()
