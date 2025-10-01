@@ -68,9 +68,13 @@ class PN532Desfire:
         #apdu = [0x90, 0x5A, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00]
         return self.send_apdu(apdu)
 
-    def create_application(self, aid, settings=0x0F, num_keys=1):
+    def create_application(self, aid, settings, num_keys):
         # 5 header + 3 aid + 2 = 10 bytes
-        apdu = [0x90, 0xCA, 0x00, 0x00, 0x05] + aid + [settings, num_keys]
+        #apdu = [0x90, 0xCA, 0x00, 0x00, 0x05] + aid + [settings, num_keys]
+        settings = 0x0F
+        num_keys = 0x25
+        #apdu = [0xCA] + aid + [settings, num_keys]
+        apdu = [0x90, 0xCA, 0x00, 0x00, 0x05] + aid + [0x0F, 0x25, 0x00]
         return self.send_apdu(apdu)
 
     def select_file(self, fid):
@@ -157,6 +161,7 @@ class PN532Desfire:
         
 
     def create_std_data_file(self, file_no, file_size, comm_settings=0x00, read_key=0, write_key=0, rw_key=0, change_key=0):
+        '''
         # 5 header + 7 data = 12 bytes
         apdu = [
             0x90, 0xCD, 0x00, 0x00, 0x07,
@@ -168,6 +173,8 @@ class PN532Desfire:
             (file_size >> 8) & 0xFF,
             file_size & 0xFF
         ]
+        '''
+        apdu = [0xCD, file_no, comm_settings, ((rw_key & 0x0F) << 4) | (change_key & 0x0F), ((read_key & 0x0F) << 4) | (write_key & 0x0F), file_size & 0xFF,  (file_size >> 8) & 0xFF, (file_size >> 16) & 0xFF]
         return self.send_apdu(apdu)
 
     def write_data(self, file_no, offset, data_bytes):
@@ -285,6 +292,7 @@ class PN532Desfire:
 
     def application_exists(self, aid):
         apdu = [0x90, 0x6A, 0x00, 0x00, 0x00]  # 5 bytes
+        
         resp = self.send_apdu_with_chaining(apdu)
         if resp:
             print("application_exists response (hex):", ' '.join(f'{b:02X}' for b in resp))
@@ -299,58 +307,225 @@ class PN532Desfire:
             return True
         print(f"Application {aid} is NOT present on the card.")
         return False
+    
+    def authenticate_3des(self, key_no, key):
+        """
+        DES/3DES legacy authentication for blank DESFire cards.
+        key: 16 bytes (2-key 3DES, default is all zeros for blank card)
+        """
+        from Crypto.Cipher import DES3
+        import os
+
+        # Accept 16 or 24 bytes, pad if needed
+        if len(key) == 8:
+            key = key * 3  # Pad to 24 bytes
+        elif len(key) == 16:
+            key = key + key[:8]  # Pad to 24 bytes
+        elif len(key) != 24:
+            raise ValueError("3DES key must be 8, 16, or 24 bytes.")
+
+        key = DES3.adjust_key_parity(key)
+
+        # Step 1: Send AuthenticateLegacy APDU
+        apdu = [0x90, 0x0A, 0x00, 0x00, 0x01, key_no, 0x00]
+        print("AuthenticateLegacy APDU:", ' '.join(f'{b:02X}' for b in apdu))
+        resp = self.send_apdu(apdu)
+        if not resp or resp[-2:] != b'\x91\xAF':
+            print("Legacy Auth step 1 failed:", resp)
+            return None
+        rndB_enc = resp[:-2]
+
+        # Step 2: Decrypt RndB (IV = all zeros)
+        cipher = DES3.new(key, DES3.MODE_CBC, iv=b'\x00'*8)
+        rndB = cipher.decrypt(bytes(rndB_enc))
+        rndB_rot = rndB[1:] + rndB[:1]
+
+        # Step 3: Generate RndA, Encrypt RndA||RndB_rot (IV = Enc_K(RndB))
+        rndA = os.urandom(8)
+        rndAB = rndA + rndB_rot
+        cipher2 = DES3.new(key, DES3.MODE_CBC, iv=bytes(rndB_enc))
+        rndAB_enc = cipher2.encrypt(rndAB)
+        apdu2 = [0x90, 0xAF, 0x00, 0x00, 0x10] + list(rndAB_enc) + [0x00]
+        resp2 = self.send_apdu(apdu2)
+        if not resp2 or resp2[-2:] != b'\x91\x00':
+            print("Legacy Auth step 2 failed:", resp2)
+            return None
+        card_response = resp2[:-2]
+
+        # Step 4: Decrypt Card Response (IV = last block of previous encryption)
+        iv = rndAB_enc[-8:]
+        cipher3 = DES3.new(key, DES3.MODE_CBC, iv=iv)
+        rotated_rndA = cipher3.decrypt(card_response)
+        expected_rotated_rndA = rndA[1:] + rndA[:1]
+        print("iv:                   ", hex_bytes(iv))
+        print("rotated_rndA:         ", hex_bytes(rotated_rndA))
+        print("expected_rotated_rndA:", hex_bytes(expected_rotated_rndA))
+        if rotated_rndA != expected_rotated_rndA:
+            print("Mutual authentication failed!")
+            return None
+
+        print("Mutual authentication succeeded!")
+        session_key = rndA[:4] + rndB[:4] + rndA[-4:] + rndB[-4:]
+        print("Session key: ", ' '.join(f'{b:02X}' for b in session_key))
+        return session_key
+
+    def authenticate_des(self, key_no, key):
+        from Crypto.Cipher import DES
+        import os
+
+        if len(key) != 8:
+            raise ValueError("DES key must be 8 bytes.")
+
+        # Step 1: Send AuthenticateLegacy APDU
+        apdu = [0x90, 0x0A, 0x00, 0x00, 0x01, key_no, 0x00]
+        print("AuthenticateLegacy APDU:", ' '.join(f'{b:02X}' for b in apdu))
+        resp = self.send_apdu_with_chaining(apdu)
+        if not resp or resp[-2:] != b'\x91\xAF':
+            print("Legacy Auth step 1 failed:", resp)
+            return None
+        rndB_enc = resp[:-2]
+
+        # Step 2: Decrypt RndB (IV = all zeros)
+        cipher = DES.new(key, DES.MODE_CBC, iv=b'\x00'*8)
+        rndB = cipher.decrypt(bytes(rndB_enc))
+        rndB_rot = rndB[1:] + rndB[:1]
+
+        # Step 3: Generate RndA, Encrypt RndA||RndB_rot (IV = Enc_K(RndB))
+        rndA = os.urandom(8)
+        rndAB = rndA + rndB_rot
+        cipher2 = DES.new(key, DES.MODE_CBC, iv=bytes(rndB_enc))
+        rndAB_enc = cipher2.encrypt(rndAB)
+        apdu2 = [0x90, 0xAF, 0x00, 0x00, 0x10] + list(rndAB_enc) + [0x00]
+        resp2 = self.send_apdu(apdu2)
+        if not resp2 or resp2[-2:] != b'\x91\x00':
+            print("Legacy Auth step 2 failed:", resp2)
+            return None
+        card_response = resp2[:-2]
+
+        # Step 4: Decrypt Card Response (IV = last block of previous encryption)
+        iv = rndAB_enc[-8:]
+        cipher3 = DES.new(key, DES.MODE_CBC, iv=iv)
+        rotated_rndA = cipher3.decrypt(card_response)
+        expected_rotated_rndA = rndA[1:] + rndA[:1]
+        print("iv:                   ", hex_bytes(iv))
+        print("rotated_rndA:         ", hex_bytes(rotated_rndA))
+        print("expected_rotated_rndA:", hex_bytes(expected_rotated_rndA))
+        if rotated_rndA != expected_rotated_rndA:
+            print("Mutual authentication failed!")
+            return None
+
+        print("Mutual authentication succeeded!")
+        session_key = rndA[:4] + rndB[:4] + rndA[-4:] + rndB[-4:]
+        print("Session key: ", ' '.join(f'{b:02X}' for b in session_key))
+        return session_key
 
 def do_config(desfire):
-    AID = [0xA1, 0xA2, 0xA3]
-    FILE_NO = 1
-    FILE_SIZE = 6
-    USERID = b'opsky1'
-    KEY = b'\x00' * 16  # Default key
-
+    # --- Step 0: Read UID and card info ---
     uid = desfire.get_card_uid()
     if not uid:
+        print("No card detected. Aborting setup.")
         return
-
+    print("Card UID:", uid.hex())
     if not desfire.is_desfire_ev3():
-        print("This is not a DESFire EV3 card. Waiting for next card...")
+        print("Not a DESFire EV3 card. Aborting setup.")
         return
 
-    print("Selecting PICC (no application) before authenticating with PICC master key...")
-    #desfire.select_application([0x00, 0x00, 0x00])
-    desfire.select_application([0xA3, 0xA2, 0xA1])
-    
-    KEY = bytes([0xAA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-    print("Authenticating with PICC master key before creating application...")
-    if not desfire.authenticate_aes(key_no=0x01, key=KEY):
+    # --- Parameters ---
+    AID = [0xA3, 0xA2, 0xA1]  # Application ID
+    FILE_NO = 0               # File number
+    FILE_SIZE = 32             # File size
+    USERID = b'123456'        # Data to write
+    PICC_KEY = b'\x00' * 16   # Default AES key for PICC (EV3)
+    APP_KEY = b'\x00' * 16    # Default AES key for new app
+    WRITE_KEY_NO = 4          # Write access key number
+    READ_KEY_NO = 3           # Read access key number
+    CONFIG_KEY_NO = 2         # Config access key number
+    RW_KEY_NO = 1             # Read/Write access key number
+
+    '''
+    # --- Step 1: Select Master Application ---
+    print("Selecting Master Application...")
+    resp = desfire.select_application([0x00, 0x00, 0x00])
+    if not resp or resp[-2:] != b'\x91\x00':
+        print("Failed to select Master Application.")
+        return
+
+    # --- Step 2: Authenticate with PICC Master Key ---
+    print("Authenticating with PICC Master Key...")
+    session_key = desfire.authenticate_3des(key_no=0x00, key=0x00)
+    if not session_key:
         print("PICC master key authentication failed! Aborting setup.")
         return
-
+    '''
+    # --- Step 3: Create the AES Application ---
     print("Checking if application exists...")
     if desfire.application_exists(AID):
         print("Application already exists. Skipping creation.")
     else:
         print("Creating application...")
-        resp = desfire.create_application(AID)
+        # settings=0x0F (AES, master key changeable), num_keys=5
+        resp = desfire.create_application(AID, settings=0x0F, num_keys=5)
         print("Create application response:", resp)
-        if not resp or resp[-2:] != b'\x91\x00':
+        if not resp or resp[-2:] != b'\x91\x00': #resp[0] != 0x00: #
             print("Application creation failed! Aborting setup.")
             return
 
+    # --- Step 4: Select the New AES Application ---
     print("Selecting new application...")
     resp = desfire.select_application(AID)
     print("Select application response:", resp)
     if not resp or resp[-2:] != b'\x91\x00':
         print("Application selection failed! Aborting setup.")
         return
+    '''
+    # --- Step 5: Authenticate with AES Application Master Key ---
+    print("Authenticating with AES Application Master Key (KeyNo=0)...")
+    session_key = desfire.authenticate_aes(key_no=0x00, key=APP_KEY)
+    if not session_key:
+        print("AES application master key authentication failed! Aborting setup.")
+        return
+    '''
 
-    time.sleep(1)
-    print("Authenticating (default key)...")
-    desfire.authenticate_aes(key_no=0x01, key=KEY)
-    print("Creating file...")
-    desfire.create_std_data_file(FILE_NO, FILE_SIZE)
-    print("Writing UserID...")
-    desfire.write_data(FILE_NO, 0, USERID)
+    # --- Step 6: Create Standard Data File ---
+    print("Creating standard data file...")
+    # comm_settings=0x00 (plain), access rights: read=0, write=WRITE_KEY_NO, rw=0, change=0
+    resp = desfire.create_std_data_file(
+        file_no=FILE_NO,
+        file_size=FILE_SIZE,
+        comm_settings=0x00,
+        read_key=3,      # R
+        write_key=4,     # W
+        rw_key=1,        # RW
+        change_key=2     # C
+    )
+    print("CreateStdDataFile response:", resp)
+    if not resp or resp[0] != 0x00 and resp[0] != 0xDE: #resp[-2:] != b'\x91\x00':
+        print("File creation failed! Aborting setup.")
+        return
+
+    # --- Step 7: Authenticate with Write Key (Key 4) ---
+    print(f"Authenticating with Write Key (KeyNo={WRITE_KEY_NO})...")
+    session_key = desfire.authenticate_aes(key_no=WRITE_KEY_NO, key=APP_KEY)
+    if not session_key:
+        print("Write key authentication failed! Aborting setup.")
+        return
+
+    # --- Step 8: Write Data to File ---
+    print("Writing data to file...")
+    resp = desfire.write_data(FILE_NO, 0, USERID)
+    print("WriteData response:", resp)
+    if not resp or resp[-2:] != b'\x91\x00':
+        print("WriteData failed! Aborting setup.")
+        return
+
+    # --- Step 9: Commit Transaction ---
+    print("Committing transaction...")
+    resp = desfire.send_apdu([0x90, 0xA7, 0x00, 0x00, 0x00])
+    print("CommitTransaction response:", resp)
+    if not resp or resp[-2:] != b'\x91\x00':
+        print("CommitTransaction failed! Aborting setup.")
+        return
+
     print("Config complete.")
     return
 
@@ -523,6 +698,36 @@ def desfire_cmac_verify(session_key, session_iv, response):
         logger.error("CMAC verification failed!")
         return False
 
+def do_quicktest(desfire):
+    """
+    Quickly test card presence, UID, EV3 detection, basic APDU, and authentication.
+    """
+    print("Running quick test...")
+    uid = desfire.get_card_uid()
+    if not uid:
+        print("No card detected.")
+        return
+    print("Card UID:", uid.hex())
+    print("Checking for DESFire EV3...")
+    if desfire.is_desfire_ev3():
+        print("DESFire EV3 card detected.")
+    else:
+        print("Not a DESFire EV3 card.")
+    # Try a simple APDU (GetVersion)
+    apdu = [0x90, 0x60, 0x00, 0x00, 0x00]
+    resp = desfire.send_apdu(apdu)
+    print("GetVersion APDU response:", resp)
+
+    # Quick DES/3DES authentication test (KeyNo=0, default key)
+    print("Testing DES/3DES authentication with non-degenerate key (for library test only)...")
+    session_key = desfire.authenticate_des(key_no=0x00, key=b'\x00'*8)
+    if session_key:
+        print("DES/3DES authentication succeeded.")
+    else:
+        print("DES/3DES authentication failed.")
+
+
+# Add to CLI handler
 if __name__ == "__main__":
     import pn532.pn532 as nfc
     from pn532 import PN532_UART
@@ -533,7 +738,7 @@ if __name__ == "__main__":
     desfire = PN532Desfire(pn532)
 
     if len(sys.argv) < 2:
-        print("Usage: python nfc_desfire.py [config|tap|changekey]")
+        print("Usage: python nfc_desfire.py [config|tap|changekey|quicktest]")
         sys.exit(1)
 
     cmd = sys.argv[1].lower()
@@ -549,23 +754,7 @@ if __name__ == "__main__":
         old_key = bytes.fromhex(sys.argv[2])
         new_key = bytes.fromhex(sys.argv[3])
         do_change_key(desfire, old_key, new_key)
+    elif cmd == "quicktest":
+        do_quicktest(desfire)
     else:
-        print("Unknown command. Use config, tap, or changekey.")
-
-if "--unittest-ref" in sys.argv:
-    # Reference values from your example
-    key = bytes.fromhex('00000000000000000000000000000000')
-    rndB_enc = bytes.fromhex('b969fdfe56fd91fc9de6f6f213b8fd1e')
-    expected_rndB = bytes.fromhex('c05ddd714fd788a6b7b754f3c4d066e8')
-    iv = bytes.fromhex('00000000000000000000000000000000')
-
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    rndB = cipher.decrypt(rndB_enc)
-
-    print("Encrypted rndB   : ", hex_bytes(rndB_enc))
-    print("key              : ", hex_bytes(key))
-    print("iv               : ", hex_bytes(iv))
-    print("")
-    print("Decrypted        : ", hex_bytes(rndB))
-
-    sys.exit(0)
+        print("Unknown command. Use config, tap, changekey, or quicktest.")
