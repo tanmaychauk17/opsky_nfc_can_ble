@@ -3,7 +3,7 @@ import logging
 SEND_INTERVAL   = 1.0  # seconds
 PGN_VALUE       = 0x00EF
 SOURCE_ADDRESS  = 0xDC
-DEST_ADDRESS    = 0xFF
+DEST_ADDRESS    = 0x19
 PRIORITY        = 6
 OPCODE_NFC_ID   = 0x0018
 
@@ -147,6 +147,58 @@ class CANModule:
             except Exception as e:
                 logger.error(f"[CanToBle PUB] Error queueing for publish: {e}")
 
+    '''
+    def convert_to_hex_bytes(self, str_uid):
+        # Ensure input is string
+        if isinstance(str_uid, bytes):
+            str_uid = str_uid.decode('ascii')
+        hardcoded_map = {
+            "FE0000000001": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x01],
+            "FE0000000002": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x02],
+            "FE0000000003": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x03],
+            "FE0000000004": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x04],
+            "FE0000000005": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x05],
+            "FE0000000006": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x06],
+        }
+        return hardcoded_map.get(str_uid, [0xFF] * 6)
+
+
+    def convert_to_hex_bytes(self,str_uid):
+        hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x01]
+        str_uid = str_uid.decode('utf-8')
+
+        if(str_uid == "FE0000000001"):
+            hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x01]
+        elif(str_uid == "FE0000000002"):
+            hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x02]
+        elif(str_uid == "FE0000000003"):
+            hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x03]
+        elif(str_uid == "FE0000000004"):
+            hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x04]
+        
+        return hex_uid
+    '''
+
+    def convert_to_hex_bytes(self, str_uid):
+        # Ensure input is string
+        if isinstance(str_uid, bytes):
+            str_uid = str_uid.decode('ascii')
+        # Pad to 12 hex chars (6 bytes)
+        str_uid = str_uid.zfill(12)
+        try:
+            hex_uid = list(bytes.fromhex(str_uid)[-6:])
+        except Exception:
+            hex_uid = [0xFF] * 6
+
+        hex_data = 0
+        hex_data = ((hex_uid[0] << 4) & 0xF0 | (hex_uid[1] >> 4) & 0x0F)
+        logger.info(f"[J1939 TX] convert_to_hex_bytes {hex_data}")
+
+        hex_uid[0] = hex_data
+        hex_uid[1] = 0x00
+
+        return hex_uid
+
     async def send_message(self):
         while True:
             try:
@@ -165,19 +217,25 @@ class CANModule:
                     try:
                         import json
                         nfc_payload = json.loads(self.nfc_data)
-                        if isinstance(nfc_payload, dict) and 'data' in nfc_payload:
-                            data_bytes = bytes(nfc_payload['data'])
+                        data_bytes = b''
+                        if isinstance(nfc_payload, dict) and 'user_id' in nfc_payload:
+                            user_id = nfc_payload['user_id']
+                            hex_user_id = self.convert_to_hex_bytes(user_id)
+                            logger.info(f"[J1939 TX] Data bytes : {hex_user_id}")
                         else:
-                            data_bytes = self.nfc_data.encode()
-                    except Exception:
-                        data_bytes = self.nfc_data.encode()
+                            logger.error("[J1939 TX] No valid user_id in NFC payload.")
+                            hex_user_id = [0xFF] * 6
+                    except Exception as e:
+                        logger.error(f"[J1939 TX] Exception: {e}")
+                        hex_user_id = [0xFF] * 6
 
                     CAN_Tx_data = bytearray(b'\xFF' * 10)
                     CAN_Tx_data[0] = 0xFF
                     CAN_Tx_data[1] = 0xF1
                     CAN_Tx_data[2] = ((OPCODE_NFC_ID >> 8) & 0xFF)
                     CAN_Tx_data[3] = (OPCODE_NFC_ID & 0xFF)
-                    CAN_Tx_data[4:10] = data_bytes[:6] + b'\xFF' * (6 - min(len(data_bytes), 6))
+                    #CAN_Tx_data[4:10] = data_bytes[:6] + b'\xFF' * (6 - min(len(data_bytes), 6))
+                    CAN_Tx_data[4:10] = bytes(hex_user_id)
 
                     logger.info(f"[J1939 TX] Sending NFC data: {CAN_Tx_data}")
                     self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data))
