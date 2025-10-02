@@ -7,7 +7,8 @@ python3 zmqhub.py > zmqhub.log 2>&1 &
 sleep 2
 
 # Start the NFC service (system Python, outside venv)
-python3 nfc_service.py > nfc_service.log 2>&1 &
+sudo python3 nfc_service.py > nfc_service.log 2>&1 &
+sleep 2
 
 sudo ip link set can0 up type can bitrate 250000
 sleep 2
