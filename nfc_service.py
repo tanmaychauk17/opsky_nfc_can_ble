@@ -32,24 +32,40 @@ class NFCModule:
         try:
             with open(os.path.join(os.path.dirname(__file__), 'config.json'), 'r') as f:
                 config = json.load(f)
-            nfc_permitted_uids = config.get('nfc_permitted_uids', [])
-            # No conversion needed, keep as strings
+            # Use 'nfc_permitted_uids' key
+            return set(config.get('nfc_permitted_uids', []))
         except Exception as e:
-            logger.error(f"[NFC CONFIG] Failed to load permitted UIDs: {e}")
-            nfc_permitted_uids = []
-        return nfc_permitted_uids
+            logger.error(f"[NFC CONFIG] Failed to load permitted devices: {e}")
+            return set()
 
     def is_device_permitted(self, data):
         try:
-            # Convert bytes or list of ints to ASCII string
+            # Always read 32 bytes, parse as USERID,NUM_DEV,DEV1,...
             if isinstance(data, bytes):
-                data_str = data.decode(errors="ignore")
+                card_str = data.decode(errors="ignore").strip(',\x00')
             elif isinstance(data, list):
-                data_str = bytes(data).decode(errors="ignore")
+                card_str = bytes(data).decode(errors="ignore").strip(',\x00')
             else:
                 logger.warning(f"[NFC] Unexpected data type in is_device_permitted: {type(data)}")
                 return False
-            return data_str in self._nfc_permitted_uids
+            parts = [p.strip() for p in card_str.split(',') if p.strip()]
+            if len(parts) < 2:
+                logger.warning(f"[NFC] Not enough data fields: {parts}")
+                return False
+            userid = parts[0]
+            num_devices = int(parts[1])
+            device_list = [d.strip() for d in parts[2:2+num_devices]]
+            allowed = set(device_list) & self._nfc_permitted_uids
+            print("Permitted devices from config:", self._nfc_permitted_uids)
+            print("Devices from card:", device_list)
+            print("Intersection:", allowed)
+            if allowed:
+                self._last_userid = userid
+                logger.info(f"[NFC] User {userid} has access to: {allowed}")
+                return True
+            else:
+                logger.warning(f"[NFC] User {userid} has no permitted device access.")
+                return False
         except Exception as e:
             logger.error(f"[NFC] Error in is_device_permitted: {e}")
             return False
@@ -88,10 +104,10 @@ class NFCModule:
         send_interval = 5  # seconds
 
         FILE_NO = 0
-        FILE_SIZE = 6
+        FILE_SIZE = 32
         KEY = b'\x00' * 16
         KEY_NO = 0x03
-        APP_AID = [0xA3, 0xA2, 0xA1]
+        APP_AID = [0xA3, 0xA2, 0xA1]    #A1A2A3
 
 
         while True:
@@ -121,6 +137,7 @@ class NFCModule:
                                     last_sent = now
                                 else:
                                     logger.warning(f"[NFC] Device with data {list(data)} is not permitted!")
+                                    last_sent = now
                         else:
                             logger.warning(f"[NFC] No data read from card.")
                     else:
@@ -135,16 +152,25 @@ class NFCModule:
                 self.init_pn532()
                 await asyncio.sleep(0.1)
             #await asyncio.sleep(0.1)  # Faster polling for better responsiveness
+    def format_userid_for_can(self, userid):
+        """
+        Converts FE03 → FE0000000003, FE01 → FE0000000001, etc.
+        """
+        if userid and userid.startswith("FE") and len(userid) == 4:
+            return f"{userid[:2]}{'0'*7}{userid[2:]}"
+        return userid  # fallback: return as-is
 
-    async def _send_uid(self, uid):
+    async def _send_uid(self, _):
         import json
         try:
-            payload = json.dumps({"data": list(uid)})
+            raw_userid = getattr(self, "_last_userid", None)
+            can_userid = self.format_userid_for_can(raw_userid)
+            payload = json.dumps({"user_id": can_userid})
             msg = f"nfc_data {payload}"
             await self.pub_socket.send_string(msg)
             logger.info(f"[NFC PUB] Published: {msg}")
         except Exception as e:
-            logger.error(f"[NFC PUB] Failed to send UID: {e}")
+            logger.error(f"[NFC PUB] Failed to send user ID: {e}")
 
     async def start(self):
         try:
