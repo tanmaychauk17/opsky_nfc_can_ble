@@ -157,7 +157,7 @@ class NFCModule:
         Converts FE03 → FE0000000003, FE01 → FE0000000001, etc.
         """
         if userid and userid.startswith("FE") and len(userid) == 4:
-            return f"{userid[:2]}{'0'*7}{userid[2:]}"
+            return f"{userid[:2]}{'0'*8}{userid[2:].zfill(2)}"
         return userid  # fallback: return as-is
 
     async def _send_uid(self, _):
