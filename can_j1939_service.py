@@ -52,6 +52,74 @@ class CANModule:
         self.sub_socket.setsockopt(zmq.LINGER, 0)
         self.pub_socket.connect(XSUB_ADDR)
         self.pub_socket.setsockopt(zmq.LINGER, 0)
+        self.PAAK_State = False # false = disabled, true = enabled
+        self.work_zone  = 0  # 0 = no zone, 1 = welcome zone, 2 = access zone
+
+    def handle_can_opcode(self, filtered_data):
+        """
+        Checks the opcode in filtered_data.
+        If a CAN-only response is needed, prepares the response and puts it on ble_to_can_queue.
+        Returns False if handled (do not forward to BLE), True otherwise.
+        """
+        if len(filtered_data) >= 2:
+            opcode = (filtered_data[0] << 8) | filtered_data[1]
+            CAN_ONLY_OPCODES = [0x0204, 0x0202]  # Replace with your actual opcodes
+
+            if opcode in CAN_ONLY_OPCODES:
+                can_data = []
+                # Prepare CAN response data
+                if opcode == 0x0204:    #get the work zone - no zone, welcome zone, access zone
+                    can_data = [0x02, 0x04, 0x00, self.work_zone]  # sending no zone by default
+
+                if opcode == 0x0202:    #get the PAAK state - enabled or disabled
+                    paak_state_byte = 0x00 if self.PAAK_State else 0x01
+                    can_data = [0x02, 0x02, 0x00, paak_state_byte]  # sending disabled by default
+
+                can_payload = json.dumps({"CanOnlyResponse": can_data})
+                self.loop.call_soon_threadsafe(ble_to_can_queue.put_nowait, can_payload)
+                logger.info(f"CAN-only opcode {hex(opcode)} handled, response queued.")
+                return False  # Already handled, do not forward to BLE
+
+        return True  # Not handled, forward to BLE
+
+    async def opsky_state_send(self, payload):
+        try:
+            # Parse payload if it's JSON, or use as is
+            try:
+                data = json.loads(payload)
+            except Exception:
+                data = payload
+
+            # Example switch/case logic (Python 3.10+ match-case, else use if-elif)
+            state = data.get("state") if isinstance(data, dict) else data
+
+            if state == "OPSKY_PAAK_ENABLED":
+                logger.info("Handling opskyState: START")
+                can_data = [0x02, 0x00]
+                self.PAAK_State = True
+            elif state == "OPSKY_PAAK_DISABLED":
+                logger.info("Handling opskyState: STOP")
+                can_data = [0x02, 0x01]
+                self.PAAK_State = False
+            elif state == "NO_ZONE":
+                logger.info("Handling opskyState: STOP")
+                can_data = [0x02, 0x03, 0x00, 0x00]
+            elif state == "WELCOME_ZONE":
+                logger.info("Handling opskyState: RESET")
+                can_data = [0x02, 0x03, 0x00, 0x01]
+            elif state == "ACCESS_ZONE":
+                logger.info("Handling opskyState: RESET")
+                can_data = [0x02, 0x03, 0x00, 0x02]
+            else:
+                logger.info(f"Handling opskyState: Unknown state {state}")
+                # Add your logic here
+
+        except Exception as e:
+            logger.error(f"Error in opsky_state_send: {e}")
+
+        logger.info("opsky_state_send - ",state)
+        can_payload = json.dumps({"OpSkyStateToCan": can_data})
+        await ble_to_can_queue.put(can_payload)
 
     async def listen_sub_data(self):
         logger.info("[NFC ZMQ] Listening for subscribed topics...")
@@ -80,10 +148,11 @@ class CANModule:
                         except Exception as e:
                             logger.error(f"Failed to parse BLE status JSON: {e}")
                             self.ble_status = False
-                    '''
-                    else:
-                        logger.warning(f"[NFC ZMQ] Unexpected topic: {topic}")
-                    '''
+
+                    if topic == "opskyState":
+                        logger.info(f"Received opskyState: {payload}")
+                        await self.opsky_state_send(payload)
+
                 except Exception as e:
                     logger.error(f"[NFC ZMQ] Error parsing message: {e}")
             except Exception as e:
@@ -129,16 +198,15 @@ class CANModule:
             self.ecu = None
 
     def on_message_received(self, priority, pgn, source, timestamp, data):
-        # Always print/log the received message
         logger.info(f"[J1939 RX] PGN: {hex(pgn)} Source: {hex(source)} Data: {data.hex()}")
 
-        # Only push to pub queue if BLE is connected and data has FF F2 prefix
-        if (
-            #self.ble_status and
-            len(data) >= 2 and
-            data[0] == 0xFF and data[1] == 0xF2
-        ):
+        if len(data) >= 2 and data[0] == 0xFF and data[1] == 0xF2:
             filtered_data = data[2:]
+            # Call your handler
+            if not self.handle_can_opcode(filtered_data):
+                return  # Already handled, do not forward to BLE
+
+            # If not handled, forward to BLE as before
             import json
             payload = json.dumps({"data": list(filtered_data)})
             msg = f"canToBle {payload}"
@@ -146,38 +214,6 @@ class CANModule:
                 self.loop.call_soon_threadsafe(can_pub_queue.put_nowait, msg)
             except Exception as e:
                 logger.error(f"[CanToBle PUB] Error queueing for publish: {e}")
-
-    '''
-    def convert_to_hex_bytes(self, str_uid):
-        # Ensure input is string
-        if isinstance(str_uid, bytes):
-            str_uid = str_uid.decode('ascii')
-        hardcoded_map = {
-            "FE0000000001": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x01],
-            "FE0000000002": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x02],
-            "FE0000000003": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x03],
-            "FE0000000004": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x04],
-            "FE0000000005": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x05],
-            "FE0000000006": [0xFE, 0x00, 0x00, 0x00, 0x00, 0x06],
-        }
-        return hardcoded_map.get(str_uid, [0xFF] * 6)
-
-
-    def convert_to_hex_bytes(self,str_uid):
-        hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x01]
-        str_uid = str_uid.decode('utf-8')
-
-        if(str_uid == "FE0000000001"):
-            hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x01]
-        elif(str_uid == "FE0000000002"):
-            hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x02]
-        elif(str_uid == "FE0000000003"):
-            hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x03]
-        elif(str_uid == "FE0000000004"):
-            hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x04]
-        
-        return hex_uid
-    '''
 
     def convert_to_hex_bytes(self, str_uid):
         # Ensure input is string
@@ -246,8 +282,15 @@ class CANModule:
                     ble_payload = await asyncio.wait_for(ble_to_can_queue.get(), timeout=0.01)
                     import json
                     bleToCan_payload = json.loads(ble_payload)
-                    if isinstance(bleToCan_payload, dict) and 'BleToCan' in bleToCan_payload:
-                        data_bytes = bytes(bleToCan_payload['BleToCan'])
+                    if isinstance(bleToCan_payload, dict):
+                        if 'BleToCan' in bleToCan_payload:
+                            data_bytes = bytes(bleToCan_payload['BleToCan'])
+                        elif 'OpSkyStateToCan' in bleToCan_payload:
+                            data_bytes = bytes(bleToCan_payload['OpSkyStateToCan'])
+                        elif 'CanOnlyResponse' in bleToCan_payload:
+                            data_bytes = bytes(bleToCan_payload['CanOnlyResponse'])
+                        else:
+                            data_bytes = ble_payload.encode()
                     else:
                         data_bytes = ble_payload.encode()
 
