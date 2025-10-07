@@ -208,6 +208,7 @@ class PN532Desfire:
             return None
 
         logger.info(f"Read successful from file {file_no}.")
+        '''#disabling the CMAC verification for now
         # The response is: [status][data][cmac]
         # resp[0] = status, resp[1:-8] = data, resp[-8:] = cmac
         session_iv = b'\x00' * 16  # For first CMAC after authentication
@@ -215,7 +216,8 @@ class PN532Desfire:
             logger.error("CMAC verification failed!")
             return None
         logger.info("CMAC verification succeeded.")
-        return bytes(resp[1:-8])  # Return only the data, not status/cmac
+        '''
+        return bytes (resp[1:33])  # Return only the data, not status/cmac
 
     def change_key(self, key_no, old_key, new_key):
         if AES is None:

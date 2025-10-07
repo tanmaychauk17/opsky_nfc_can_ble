@@ -1,0 +1,14 @@
+
+[Unit]
+Description=My Startup Service
+After=network.target
+
+[Service]
+WorkingDirectory=/home/admin/opsky_nfc_can_ble
+ExecStart=/home/admin/opsky_nfc_can_ble/run_all.sh
+Restart=on-failure
+User=root
+
+[Install]
+WantedBy=multi-user.target
+
