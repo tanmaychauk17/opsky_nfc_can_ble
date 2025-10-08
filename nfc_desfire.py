@@ -19,32 +19,46 @@ logger = logging.getLogger("pn532_desfire")
 def hex_bytes(data):
     return ' '.join(f'{b:02X}' for b in data)
 
-class PN532Desfire:
-    def __init__(self, pn532):
-        self.pn532 = pn532
-        self.session_key = None
-        self.last_uid = None
 
-    def in_data_exchange(self, data):
+class PN532Desfire:
+    """
+    Class to interact with MIFARE DESFire cards using a PN532 reader.
+    Handles authentication, file operations, and CMAC verification.
+    """
+    def __init__(self, pn532: object):
+        """
+        Initialize with a PN532 interface object.
+        """
+        self.pn532 = pn532
+        self.session_key: bytes | None = None
+        self.last_uid: bytes | None = None
+
+    def in_data_exchange(self, data: list[int] | bytes) -> bytes | None:
+        """
+        Exchange data with the card using the PN532.
+        """
         flat_data = list(itertools.chain.from_iterable(
             x if isinstance(x, (list, tuple)) else [x] for x in data
         ))
-        logger.debug(f"Calling call_function with command=0x40, params={flat_data}")
+        logger.debug(f"[PN532Desfire] Calling call_function with command=0x40, params={flat_data}")
         response = self.pn532.call_function(0x40, response_length=255, params=[0x01] + flat_data)
         if response and response[0] == 0x00:
             return response[1:]
         return response
 
-    def send_apdu(self, apdu):
+    def send_apdu(self, apdu: list[int] | bytes) -> bytes | None:
+        """
+        Send an APDU command to the card and return the response.
+        """
         try:
-            print(f"APDU CMD: {' '.join(f'{b:02X}' for b in apdu)}")
-            logger.debug(f"Sending APDU: {apdu}")
+            logger.info(f"[PN532Desfire] APDU CMD: {' '.join(f'{b:02X}' for b in apdu)}")
+            logger.debug(f"[PN532Desfire] Sending APDU: {apdu}")
             response = self.in_data_exchange(apdu)
-            print(f"APDU RESP: {response if response is None else ' '.join(f'{b:02X}' for b in response)}")
-            logger.debug(f"APDU response: {response}")
+            logger.info(f"[PN532Desfire] APDU RESP: {response if response is None else ' '.join(f'{b:02X}' for b in response)}")
+            logger.debug(f"[PN532Desfire] APDU response: {response}")
             return response
         except Exception as e:
-            logger.error(f"APDU send failed: {e}")
+            logger.error(f"[PN532Desfire] APDU send failed: {e}")
             return None
 
     def send_apdu_with_chaining(self, apdu):
@@ -185,58 +199,58 @@ class PN532Desfire:
         ] + list(data_bytes)
         return self.send_apdu(apdu)
 
-    def read_data(self, file_no, offset, length, key_no, key, uid):
+    def read_data(
+        self,
+        file_no: int,
+        offset: int,
+        length: int,
+        key_no: int,
+        key: bytes,
+        uid: int | None = None
+    ) -> bytes | None:
         """
-        Always authenticate before reading data from the file.
+        Authenticate and read data from a file on the card.
+        Returns 33 bytes (32 data + 1 status) if successful, None otherwise.
+        Raises ValueError on invalid input.
         """
         APP_AID = [0xA3, 0xA2, 0xA1]
         self.select_application(APP_AID)
-        logger.info(f"Authenticating with key_no={key_no} before reading...")
+        logger.info(f"[PN532Desfire] Authenticating with key_no={key_no} before reading...")
         self.session_key = self.authenticate_aes(key_no=key_no, key=key)
         if not self.session_key:
-            logger.error("Authentication failed. Cannot read data.")
-            return None
+            logger.error("[PN532Desfire] Authentication failed. Cannot read data.")
+            raise ValueError("Authentication failed.")
 
-        logger.info(f"Building read APDU for file_no={file_no}, offset={offset}, length={length}")
+        logger.info(f"[PN532Desfire] Building read APDU for file_no={file_no}, offset={offset}, length={length}")
+        if not (0 <= file_no <= 31):
+            raise ValueError("file_no must be between 0 and 31")
+        if not (0 <= offset < 1 << 24):
+            raise ValueError("offset out of range")
+        if not (0 < length <= 32):
+            raise ValueError("length must be 1-32 bytes")
         apdu = [
             0xBD, file_no, (offset & 0xFF), (offset >> 8) & 0xFF, (offset >> 16) & 0xFF,
             (length & 0xFF), (length >> 8) & 0xFF, (length >> 16) & 0xFF
         ]
 
-        logger.info(f"Calculating the cmac for request")
-        #create the session Keys
         cmac_session = cmac_calc.CMACSession(self.session_key)
-        logger.info(f"Calculating the cmac for request")
-
-        # Ensure apdu is a list before passing to cmac_calculate
-        apdu_list = list(apdu)
-        cmac, updated_iv = cmac_calc.cmac_calculate(bytes(apdu_list), self.session_key, cmac_session.session_iv, cmac_session.subkey1, cmac_session.subkey2)
+        cmac, updated_iv = cmac_session.calculate(bytes(apdu))
 
         resp = self.send_apdu(apdu)
         if not resp or len(resp) < 2 or resp[0] != 0x00:
-            # Defensive: convert resp to bytes for hex if it's a list
             if isinstance(resp, list):
-                logger.error(f"Failed to read data from file {file_no}. Response: {bytes(resp).hex()}")
+                logger.error(f"[PN532Desfire] Failed to read data from file {file_no}. Response: {bytes(resp).hex()}")
             else:
-                logger.error(f"Failed to read data from file {file_no}. Response: {resp}")
-            return None
+                logger.error(f"[PN532Desfire] Failed to read data from file {file_no}. Response: {resp}")
+            raise ValueError("Read failed or invalid response.")
 
-        logger.info(f"Read successful from file {file_no}.")
-
-        # Defensive: ensure resp[1:33] is bytes, and append status byte (resp[0])
-        if isinstance(resp, (bytes, bytearray)):
-            data_bytes = resp[1:33] + resp[0:1]
-        else:
-            data_bytes = bytes(resp[1:33]) + bytes([resp[0]])
-
-        logger.info(f"Read data+status (hex): {data_bytes.hex()}")
-        cmac, updated_iv = cmac_calc.cmac_calculate(data_bytes, self.session_key, updated_iv, cmac_session.subkey1, cmac_session.subkey2)
-
-        if cmac != resp[-8:]:
-            logger.error(f"CMAC verification FAILED: does not match card. Calculated CMAC: {cmac.hex()}, Card CMAC: {bytes(resp[-8:]).hex()}")
-            return None
-        logger.info("CMAC verification SUCCESS: matches card.")
-        return data_bytes  # Return 32 bytes data + 1 status byte (33 bytes)
+        logger.info(f"[PN532Desfire] Read successful from file {file_no}.")
+        try:
+            data_bytes = cmac_session.verify_read_response(resp, updated_iv, logger)
+        except cmac_calc.CMACVerificationError as e:
+            logger.error(f"[PN532Desfire] CMAC verification failed: {e}")
+            raise ValueError("CMAC verification failed.") from e
+        return data_bytes
 
     def change_key(self, key_no, old_key, new_key):
         if AES is None:

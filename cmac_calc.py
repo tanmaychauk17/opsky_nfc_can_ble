@@ -1,90 +1,102 @@
-import sys
-sys.path.append('./my_libs')
 
-try:
-    from Crypto.Cipher import AES
-    from Crypto.Random import get_random_bytes
-    from Crypto.Hash import CMAC
-except ImportError:
-    AES = None
+
+from Crypto.Cipher import AES
+import logging
+from typing import Tuple
+
+
+
+class CMACVerificationError(Exception):
+    """Raised when CMAC verification fails."""
+    pass
 
 class CMACSession:
     """
     Helper class to manage session IV and verify a sequence of responses.
+    Handles CMAC calculation and verification for a session.
+    Maintains session key and IV state.
     """
     def __init__(self, session_key: bytes, initial_iv: bytes = None):
-        self.session_key = session_key
-        self.session_iv = initial_iv if initial_iv is not None else b'\x00' * 16
-        self.subkey1 = generate_subkey_1(session_key)
-        self.subkey2 = generate_subkey_2(self.subkey1)
+        """
+        Initialize with a session key (16 bytes) and optional IV.
+        """
+        if not isinstance(session_key, bytes) or len(session_key) != 16:
+            raise ValueError("session_key must be 16 bytes")
+        self.session_key: bytes = session_key
+        self.session_iv: bytes = initial_iv if initial_iv is not None else b'\x00' * 16
+        self.subkey1: bytes = generate_subkey_1(session_key)
+        self.subkey2: bytes = generate_subkey_2(self.subkey1)
 
-    def verify_response(self, response: bytes) -> bool:
-        if len(response) < 9:
-            logger.error("Response too short to contain status, data, and CMAC.")
-            return False
-        status = response[0:1]
-        data = response[1:-8]
-        cmac_from_card = response[-8:]
-        logger.info(f"Status: {status.hex()}")
-        logger.info(f"Data: {data.hex()}")
-        logger.info(f"CMAC from card: {cmac_from_card.hex()}")
-        cmac_input = data + status
-        cmac_calc, updated_iv = cmac_calculate(cmac_input, self.session_key, self.session_iv, self.subkey1, self.subkey2)
-        logger.info(f"Calculated CMAC: {cmac_calc.hex()}")
-        match = cmac_calc == cmac_from_card
-        if match:
-            logger.info("CMAC verification SUCCESS: matches card.")
+    def calculate(self, data: bytes, session_iv: bytes = None) -> Tuple[bytes, bytes]:
+        """
+        Calculate CMAC for a block of data. Returns (cmac, updated_iv).
+        Prints all relevant cryptographic material for debugging.
+        """
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if session_iv is None:
+            session_iv = self.session_iv
+        logger.info(f"[CMACSession] Data:        {data.hex()}")
+        logger.info(f"[CMACSession] Session Key: {self.session_key.hex()}")
+        logger.info(f"[CMACSession] Subkey1:     {self.subkey1.hex()}")
+        logger.info(f"[CMACSession] Subkey2:     {self.subkey2.hex()}")
+        logger.info(f"[CMACSession] IV:          {session_iv.hex()}")
+        # Padding logic: if data length is exactly 16 or 32, no padding. Otherwise, pad.
+        if len(data) == 16 or len(data) == 32:
+            padded = data
+            needs_padding = False
+            logger.info("[CMACSession] No padding required (len=16 or 32)")
         else:
-            logger.error("CMAC verification FAILED: does not match card.")
-        # Update IV for next message
-        self.session_iv = updated_iv
-        return match
+            padded = pad_data(data)
+            needs_padding = True
+            logger.info("[CMACSession] Padding was added (len != 16 and != 32)")
+        logger.info(f"[CMACSession] Padded data: {padded.hex()}")
+        # XOR last block
+        last_block = bytearray(padded[-16:])
+        if needs_padding:
+            #logger.info("[CMACSession] XOR last block with subkey2 (padded)")
+            for i in range(16):
+                last_block[i] ^= self.subkey2[i]
+        else:
+            #logger.info("[CMACSession] XOR last block with subkey1 (not padded)")
+            for i in range(16):
+                last_block[i] ^= self.subkey1[i]
+        #logger.info(f"[CMACSession] XOR output (last block after XOR): {last_block.hex()}")
+        # Replace last block
+        padded = padded[:-16] + bytes(last_block)
+        # Encrypt
+        cipher = AES.new(self.session_key, AES.MODE_CBC, session_iv)
+        encrypted = cipher.encrypt(padded)
+        logger.info(f"[CMACSession] CMAC encrypted: {encrypted.hex()}")
+        # Update IV
+        updated_iv = encrypted[-16:]
+        cmac = updated_iv[:8]
+        logger.info(f"[CMACSession] CMAC: {cmac.hex()}")
+        return cmac, updated_iv
 
-def verify_card_response_cmac(session_key: bytes, session_iv: bytes, response: bytes) -> bool:
-    """
-    Verifies the CMAC in a card response.
-    response: status(1) + data(N) + cmac(8)
-    Returns True if CMAC matches, False otherwise.
-    """
-    if len(response) < 9:
-        logger.error("Response too short to contain status, data, and CMAC.")
-        return False
-    status = response[0:1]
-    data = response[1:-8]
-    cmac_from_card = response[-8:]
-    logger.info(f"Status: {status.hex()}")
-    logger.info(f"Data: {data.hex()}")
-    logger.info(f"CMAC from card: {cmac_from_card.hex()}")
-    # Prepare CMAC input: data + status
-    cmac_input = data + status
-    cmac_input = status + data
-    subkey1 = generate_subkey_1(session_key)
-    subkey2 = generate_subkey_2(subkey1)
-    cmac_calc, _ = cmac_calculate(cmac_input, session_key, session_iv, subkey1, subkey2)
-    logger.info(f"Calculated CMAC: {cmac_calc.hex()}")
-    match = cmac_calc == cmac_from_card
-    if match:
-        logger.info("CMAC verification SUCCESS: matches card.")
-    else:
-        logger.error("CMAC verification FAILED: does not match card.")
-    return match
-
-
-# --- Modular CMAC/CRC Implementation ---
-import logging
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
-
-# --- Global Config ---
-import logging
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
-from typing import Tuple
-
-# --- Global Config ---
-session_key = bytes.fromhex("8B47E99F74F6E97972AA90A903ECAE0C")
-session_iv = b"\x00" * 16
-test_data = b""  # Set this to your test data
+    def verify_read_response(self, resp: bytes, updated_iv: bytes = None, logger=None) -> bytes:
+        """
+        Verifies the CMAC of a DESFire read response and extracts the data+status bytes.
+        Returns data_bytes (32 bytes data + 1 status byte) if CMAC matches.
+        Raises CMACVerificationError if verification fails.
+        """
+        if logger is None:
+            logger = logging.getLogger("cmac")
+        if updated_iv is None:
+            updated_iv = self.session_iv
+        if not isinstance(resp, (bytes, bytearray)):
+            raise TypeError("resp must be bytes or bytearray")
+        if len(resp) < 41:
+            logger.error("[CMACSession] Response too short for CMAC verification.")
+            raise CMACVerificationError("Response too short for CMAC verification.")
+        data_bytes = resp[1:33] + resp[0:1]
+        logger.info(f"[CMACSession] Read data+status (hex): {data_bytes.hex()}")
+        cmac, _ = self.calculate(data_bytes, updated_iv)
+        if cmac != resp[-8:]:
+            logger.error(f"[CMACSession] CMAC verification FAILED: does not match card. Calculated CMAC: {cmac.hex()}, Card CMAC: {bytes(resp[-8:]).hex()}")
+            raise CMACVerificationError("CMAC does not match card.")
+        logger.info("[CMACSession] CMAC verification SUCCESS: matches card.")
+        return data_bytes
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cmac")
@@ -138,44 +150,7 @@ def crc32_custom(data: bytes) -> int:
                 crc >>= 1
     return crc
 
-def cmac_calculate(data: bytes, session_key: bytes, session_iv: bytes, subkey1: bytes, subkey2: bytes) -> Tuple[bytes, bytes]:
-    """
-    Calculate CMAC for a block of data. Returns (cmac, updated_iv)
-    """
-    logger.info(f"CMAC input data: {data.hex()}")
-    logger.info(f"CMAC encryption key: {session_key.hex()}")
-    # Padding logic: if data length is exactly 16 or 32, no padding. Otherwise, pad.
-    if len(data) == 16 or len(data) == 32:
-        padded = data
-        needs_padding = False
-        logger.info("No padding required (len=16 or 32)")
-    else:
-        padded = pad_data(data)
-        needs_padding = True
-        logger.info("Padding was added (len != 16 and != 32)")
-    logger.info(f"Padded data: {padded.hex()}")
-    # XOR last block
-    last_block = bytearray(padded[-16:])
-    if needs_padding:
-        logger.info("XOR last block with subkey2 (padded)")
-        for i in range(16):
-            last_block[i] ^= subkey2[i]
-    else:
-        logger.info("XOR last block with subkey1 (not padded)")
-        for i in range(16):
-            last_block[i] ^= subkey1[i]
-    logger.info(f"XOR output (last block after XOR): {last_block.hex()}")
-    # Replace last block
-    padded = padded[:-16] + bytes(last_block)
-    # Encrypt
-    cipher = AES.new(session_key, AES.MODE_CBC, session_iv)
-    encrypted = cipher.encrypt(padded)
-    logger.info(f"CMAC encrypted: {encrypted.hex()}")
-    # Update IV
-    updated_iv = encrypted[-16:]
-    cmac = updated_iv[:8]
-    logger.info(f"CMAC: {cmac.hex()}")
-    return cmac, updated_iv
+
 
 if __name__ == "__main__":
     # --- Card response CMAC verification demo with session IV update ---
@@ -185,11 +160,11 @@ if __name__ == "__main__":
     #Calculate the CMAC for the command being sent, use this CMAC as session iv for the next calculation.
     cmac_session = CMACSession(session_key_bytes)
     data = bytes.fromhex('BD00000000200000')
-    cmac_calc, updated_iv = cmac_calculate(data, cmac_session.session_key, cmac_session.session_iv, cmac_session.subkey1, cmac_session.subkey2)
+    cmac_calc, updated_iv = cmac_session.calculate(data)
 
     print("**************Iteration 2")
     #use previously generated cmac as iv and calculate the cmac for the received data (responseData + status)
     response_bytes = bytes.fromhex('464530352C312C6F70736B79310000000000000000000000000000000000000000')
     #response_buffer =     bytes.fromhex('00464530352C312C6F70736B793100000000000000000000000000000000000000EE69E1D312FC2519')
-    cmac_calc, updated_iv = cmac_calculate(response_bytes, cmac_session.session_key, updated_iv, cmac_session.subkey1, cmac_session.subkey2)
+    cmac_calc, updated_iv = cmac_session.calculate(response_bytes, updated_iv)
     #cmac_session.verify_response(response_buffer)
