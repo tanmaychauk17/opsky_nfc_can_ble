@@ -2,7 +2,7 @@ import logging
 import itertools
 import sys
 import time
-
+import cmac_calc
 
 import sys
 sys.path.append('./my_libs')
@@ -202,22 +202,41 @@ class PN532Desfire:
             0xBD, file_no, (offset & 0xFF), (offset >> 8) & 0xFF, (offset >> 16) & 0xFF,
             (length & 0xFF), (length >> 8) & 0xFF, (length >> 16) & 0xFF
         ]
+
+        logger.info(f"Calculating the cmac for request")
+        #create the session Keys
+        cmac_session = cmac_calc.CMACSession(self.session_key)
+        logger.info(f"Calculating the cmac for request")
+
+        # Ensure apdu is a list before passing to cmac_calculate
+        apdu_list = list(apdu)
+        cmac, updated_iv = cmac_calc.cmac_calculate(bytes(apdu_list), self.session_key, cmac_session.session_iv, cmac_session.subkey1, cmac_session.subkey2)
+
         resp = self.send_apdu(apdu)
         if not resp or len(resp) < 2 or resp[0] != 0x00:
-            logger.error(f"Failed to read data from file {file_no}. Response: {resp}")
+            # Defensive: convert resp to bytes for hex if it's a list
+            if isinstance(resp, list):
+                logger.error(f"Failed to read data from file {file_no}. Response: {bytes(resp).hex()}")
+            else:
+                logger.error(f"Failed to read data from file {file_no}. Response: {resp}")
             return None
 
         logger.info(f"Read successful from file {file_no}.")
-        '''#disabling the CMAC verification for now
-        # The response is: [status][data][cmac]
-        # resp[0] = status, resp[1:-8] = data, resp[-8:] = cmac
-        session_iv = b'\x00' * 16  # For first CMAC after authentication
-        if not desfire_cmac_verify(self.session_key, session_iv, resp):
-            logger.error("CMAC verification failed!")
+
+        # Defensive: ensure resp[1:33] is bytes, and append status byte (resp[0])
+        if isinstance(resp, (bytes, bytearray)):
+            data_bytes = resp[1:33] + resp[0:1]
+        else:
+            data_bytes = bytes(resp[1:33]) + bytes([resp[0]])
+
+        logger.info(f"Read data+status (hex): {data_bytes.hex()}")
+        cmac, updated_iv = cmac_calc.cmac_calculate(data_bytes, self.session_key, updated_iv, cmac_session.subkey1, cmac_session.subkey2)
+
+        if cmac != resp[-8:]:
+            logger.error(f"CMAC verification FAILED: does not match card. Calculated CMAC: {cmac.hex()}, Card CMAC: {bytes(resp[-8:]).hex()}")
             return None
-        logger.info("CMAC verification succeeded.")
-        '''
-        return bytes (resp[1:33])  # Return only the data, not status/cmac
+        logger.info("CMAC verification SUCCESS: matches card.")
+        return data_bytes  # Return 32 bytes data + 1 status byte (33 bytes)
 
     def change_key(self, key_no, old_key, new_key):
         if AES is None:
@@ -553,21 +572,3 @@ if __name__ == "__main__":
         do_change_key(desfire, old_key, new_key)
     else:
         print("Unknown command. Use config, tap, or changekey.")
-
-if "--unittest-ref" in sys.argv:
-    # Reference values from your example
-    key = bytes.fromhex('00000000000000000000000000000000')
-    rndB_enc = bytes.fromhex('b969fdfe56fd91fc9de6f6f213b8fd1e')
-    expected_rndB = bytes.fromhex('c05ddd714fd788a6b7b754f3c4d066e8')
-    iv = bytes.fromhex('00000000000000000000000000000000')
-
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    rndB = cipher.decrypt(rndB_enc)
-
-    print("Encrypted rndB   : ", hex_bytes(rndB_enc))
-    print("key              : ", hex_bytes(key))
-    print("iv               : ", hex_bytes(iv))
-    print("")
-    print("Decrypted        : ", hex_bytes(rndB))
-
-    sys.exit(0)

@@ -82,7 +82,7 @@ from Crypto.Random import get_random_bytes
 from typing import Tuple
 
 # --- Global Config ---
-session_key = bytes.fromhex("2B7E151628AED2A6ABF7158809CF4F3C")
+session_key = bytes.fromhex("8B47E99F74F6E97972AA90A903ECAE0C")
 session_iv = b"\x00" * 16
 test_data = b""  # Set this to your test data
 
@@ -144,18 +144,24 @@ def cmac_calculate(data: bytes, session_key: bytes, session_iv: bytes, subkey1: 
     """
     logger.info(f"CMAC input data: {data.hex()}")
     logger.info(f"CMAC encryption key: {session_key.hex()}")
-    # Padding
-    needs_padding = (len(data) == 0 or len(data) % 16 != 0)
-    padded = pad_data(data)
+    # Padding logic: if data length is exactly 16 or 32, no padding. Otherwise, pad.
+    if len(data) == 16 or len(data) == 32:
+        padded = data
+        needs_padding = False
+        logger.info("No padding required (len=16 or 32)")
+    else:
+        padded = pad_data(data)
+        needs_padding = True
+        logger.info("Padding was added (len != 16 and != 32)")
     logger.info(f"Padded data: {padded.hex()}")
     # XOR last block
     last_block = bytearray(padded[-16:])
     if needs_padding:
-        logger.info("Padding was added, XOR last block with subkey2")
+        logger.info("XOR last block with subkey2 (padded)")
         for i in range(16):
             last_block[i] ^= subkey2[i]
     else:
-        logger.info("No padding, XOR last block with subkey1")
+        logger.info("XOR last block with subkey1 (not padded)")
         for i in range(16):
             last_block[i] ^= subkey1[i]
     logger.info(f"XOR output (last block after XOR): {last_block.hex()}")
@@ -173,11 +179,17 @@ def cmac_calculate(data: bytes, session_key: bytes, session_iv: bytes, subkey1: 
 
 if __name__ == "__main__":
     # --- Card response CMAC verification demo with session IV update ---
-    session_key_bytes   = bytes.fromhex('0BC67C01B13F822DC0B7591F771726AF')
-    response_bytes      = bytes.fromhex('003132333435368564572DB0B05CC7')
+    session_key_bytes   = bytes.fromhex('05CA26E4AEF34BF0A7D10A82D87F699F')
     session_iv_bytes    = bytes.fromhex('00000000000000000000000000000000')
-    #session_iv_bytes   = bytes.fromhex('38 AA 22 3E 9C 4F 00 78 C0 23 16 DC 0B C4 94 7B')
 
-    logger.info("\n--- Card Response CMAC Verification (with session IV tracking) ---")
+    #Calculate the CMAC for the command being sent, use this CMAC as session iv for the next calculation.
     cmac_session = CMACSession(session_key_bytes)
-    cmac_session.verify_response(response_bytes)
+    data = bytes.fromhex('BD00000000200000')
+    cmac_calc, updated_iv = cmac_calculate(data, cmac_session.session_key, cmac_session.session_iv, cmac_session.subkey1, cmac_session.subkey2)
+
+    print("**************Iteration 2")
+    #use previously generated cmac as iv and calculate the cmac for the received data (responseData + status)
+    response_bytes = bytes.fromhex('464530352C312C6F70736B79310000000000000000000000000000000000000000')
+    #response_buffer =     bytes.fromhex('00464530352C312C6F70736B793100000000000000000000000000000000000000EE69E1D312FC2519')
+    cmac_calc, updated_iv = cmac_calculate(response_bytes, cmac_session.session_key, updated_iv, cmac_session.subkey1, cmac_session.subkey2)
+    #cmac_session.verify_response(response_buffer)

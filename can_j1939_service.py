@@ -49,6 +49,7 @@ class CANModule:
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "nfc_data")
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "bleToCan")
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "bleStatus")  # <-- Subscribe to BLE status
+        self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "opskyState")
         self.sub_socket.setsockopt(zmq.LINGER, 0)
         self.pub_socket.connect(XSUB_ADDR)
         self.pub_socket.setsockopt(zmq.LINGER, 0)
@@ -200,7 +201,7 @@ class CANModule:
     def on_message_received(self, priority, pgn, source, timestamp, data):
         logger.info(f"[J1939 RX] PGN: {hex(pgn)} Source: {hex(source)} Data: {data.hex()}")
 
-        if len(data) >= 2 and data[0] == 0xFF and data[1] == 0xF2:
+        if len(data) >= 2 and data[0] == 0xFF and data[1] == 0xF2 and data[2] == 0x00:
             filtered_data = data[2:]
             # Call your handler
             if not self.handle_can_opcode(filtered_data):
@@ -259,10 +260,11 @@ class CANModule:
                     CAN_Tx_data = bytearray(b'\xFF' * 10)
                     CAN_Tx_data[0] = 0xFF
                     CAN_Tx_data[1] = 0xF1
-                    CAN_Tx_data[2] = ((OPCODE_NFC_ID >> 8) & 0xFF)
-                    CAN_Tx_data[3] = (OPCODE_NFC_ID & 0xFF)
+                    CAN_Tx_data[2] = 0x00
+                    CAN_Tx_data[3] = ((OPCODE_NFC_ID >> 8) & 0xFF)
+                    CAN_Tx_data[4] = (OPCODE_NFC_ID & 0xFF)
                     #CAN_Tx_data[4:10] = data_bytes[:6] + b'\xFF' * (6 - min(len(data_bytes), 6))
-                    CAN_Tx_data[4:10] = bytes(hex_user_id)
+                    CAN_Tx_data[5:11] = bytes(hex_user_id)
 
                     logger.info(f"[J1939 TX] Sending NFC data: {CAN_Tx_data}")
                     self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data))
@@ -285,19 +287,25 @@ class CANModule:
                     else:
                         data_bytes = ble_payload.encode()
 
-                    if len(data_bytes) <= 6:
-                        CAN_Tx_data = bytearray(b'\xFF' * 8)
-                        CAN_Tx_data[0] = 0xFF
-                        CAN_Tx_data[1] = 0xF1
-                        CAN_Tx_data[2:2+len(data_bytes)] = data_bytes
+                    if len(data_bytes) <= 5:
+                        logger.info(f"[J1939 TX] if - databytes: {data_bytes}")
+                        CAN_Tx_data_buf2 = bytearray(b'\xFF' * 8)
+                        CAN_Tx_data_buf2[0] = 0xFF
+                        CAN_Tx_data_buf2[1] = 0xF1
+                        CAN_Tx_data_buf2[2] = 0x00
+                        for i in range(len(data_bytes)):
+                            CAN_Tx_data_buf2[3+i] = data_bytes[i]
                     else:
-                        CAN_Tx_data = bytearray(b'\xFF' * (2 + len(data_bytes)))
-                        CAN_Tx_data[0] = 0xFF
-                        CAN_Tx_data[1] = 0xF1
-                        CAN_Tx_data[2:2+len(data_bytes)] = data_bytes
+                        logger.info(f"[J1939 TX] else - databytes: {data_bytes}")
+                        CAN_Tx_data_buf2 = bytearray(b'\xFF' * (3 + len(data_bytes)))
+                        CAN_Tx_data_buf2[0] = 0xFF
+                        CAN_Tx_data_buf2[1] = 0xF1
+                        CAN_Tx_data_buf2[2] = 0x00
+                        for i in range(len(data_bytes)):
+                            CAN_Tx_data_buf2[3+i] = data_bytes[i]
 
-                    logger.info(f"[J1939 TX] Sending BleToCan data: {CAN_Tx_data}")
-                    self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data))
+                    logger.info(f"[J1939 TX] Sending BleToCan data: {CAN_Tx_data_buf2}")
+                    self.ca.send_pgn(PRIORITY, pgn, DEST_ADDRESS, SOURCE_ADDRESS, list(CAN_Tx_data_buf2))
                 except asyncio.TimeoutError:
                     pass  # No BLE-to-CAN message this cycle
 
