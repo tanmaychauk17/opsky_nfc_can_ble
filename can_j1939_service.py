@@ -3,7 +3,7 @@ import logging
 SEND_INTERVAL   = 1.0  # seconds
 PGN_VALUE       = 0x00EF
 SOURCE_ADDRESS  = 0xDC
-DEST_ADDRESS    = 0x19
+DEST_ADDRESS    = 0xFF #0x19
 PRIORITY        = 6
 OPCODE_NFC_ID   = 0x0018
 
@@ -216,22 +216,13 @@ class CANModule:
                 logger.error(f"[CanToBle PUB] Error queueing for publish: {e}")
 
     def convert_to_hex_bytes(self, str_uid):
-        # Ensure input is string
-        if isinstance(str_uid, bytes):
-            str_uid = str_uid.decode('ascii')
         # Pad to 12 hex chars (6 bytes)
         str_uid = str_uid.zfill(12)
+        logger.info(f"[J1939 TX] convert_to_hex_bytes 1 : {str_uid}")
         try:
             hex_uid = list(bytes.fromhex(str_uid)[-6:])
         except Exception:
-            hex_uid = [0xFF] * 6
-
-        hex_data = 0
-        hex_data = ((hex_uid[0] << 4) & 0xF0 | (hex_uid[1] >> 4) & 0x0F)
-        logger.info(f"[J1939 TX] convert_to_hex_bytes {hex_data}")
-
-        hex_uid[0] = hex_data
-        hex_uid[1] = 0x00
+            hex_uid = [0xFE, 0x00, 0x00, 0x00, 0x00, 0x01]
 
         return hex_uid
 
