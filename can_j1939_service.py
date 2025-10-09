@@ -16,6 +16,7 @@ import can
 import j1939
 import random
 import time
+import json
 
 can_message_queue = asyncio.Queue()
 can_pub_queue = asyncio.Queue()
@@ -85,14 +86,17 @@ class CANModule:
 
     async def opsky_state_send(self, payload):
         try:
-            # Parse payload if it's JSON, or use as is
-            try:
-                data = json.loads(payload)
-            except Exception:
-                data = payload
+            # Accepts payload in the format: 'opskyState OPSKY_PAAK_ENABLED'
+            if isinstance(payload, str) and payload.startswith("opskyState "):
+                state = payload[len("opskyState "):].strip()
+            else:
+                # fallback: try to parse as JSON or use as is
+                try:
+                    data = json.loads(payload)
+                    state = data.get("state") if isinstance(data, dict) else str(data)
 
-            # Example switch/case logic (Python 3.10+ match-case, else use if-elif)
-            state = data.get("state") if isinstance(data, dict) else data
+                except Exception:
+                    state = str(payload)
 
             if state == "OPSKY_PAAK_ENABLED":
                 logger.info("Handling opskyState: START")
@@ -113,14 +117,16 @@ class CANModule:
                 can_data = [0x02, 0x03, 0x00, 0x02]
             else:
                 logger.info(f"Handling opskyState: Unknown state {state}")
-                # Add your logic here
+                can_data = []
 
         except Exception as e:
             logger.error(f"Error in opsky_state_send: {e}")
+            can_data = []
 
-        logger.info("opsky_state_send - ",state)
-        can_payload = json.dumps({"OpSkyStateToCan": can_data})
-        await ble_to_can_queue.put(can_payload)
+        logger.info(f"opsky_state_send - {state}")
+        if can_data:
+            can_payload = json.dumps({"OpSkyStateToCan": can_data})
+            await ble_to_can_queue.put(can_payload)
 
     async def listen_sub_data(self):
         logger.info("[NFC ZMQ] Listening for subscribed topics...")
@@ -278,10 +284,13 @@ class CANModule:
                     if isinstance(bleToCan_payload, dict):
                         if 'BleToCan' in bleToCan_payload:
                             data_bytes = bytes(bleToCan_payload['BleToCan'])
+                            logger.info(f'[J1939 TX] BleToCan databytes: {data_bytes}')
                         elif 'OpSkyStateToCan' in bleToCan_payload:
                             data_bytes = bytes(bleToCan_payload['OpSkyStateToCan'])
+                            logger.info(f'[J1939 TX] OpSkyStateToCan databytes: {data_bytes}')
                         elif 'CanOnlyResponse' in bleToCan_payload:
                             data_bytes = bytes(bleToCan_payload['CanOnlyResponse'])
+                            logger.info(f'[J1939 TX] CanOnlyResponse databytes: {data_bytes}')
                         else:
                             data_bytes = ble_payload.encode()
                     else:
