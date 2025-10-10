@@ -99,21 +99,21 @@ class CANModule:
                     state = str(payload)
 
             if state == "OPSKY_PAAK_ENABLED":
-                logger.info("Handling opskyState: START")
+                logger.info("Handling opskyState: ENABLED")
                 can_data = [0x02, 0x00]
                 self.PAAK_State = True
             elif state == "OPSKY_PAAK_DISABLED":
-                logger.info("Handling opskyState: STOP")
+                logger.info("Handling opskyState: DISABLED")
                 can_data = [0x02, 0x01]
                 self.PAAK_State = False
             elif state == "NO_ZONE":
-                logger.info("Handling opskyState: STOP")
+                logger.info("Handling opskyState: NO_ZONE")
                 can_data = [0x02, 0x03, 0x00, 0x00]
             elif state == "WELCOME_ZONE":
-                logger.info("Handling opskyState: RESET")
+                logger.info("Handling opskyState: WELCOME_ZONE")
                 can_data = [0x02, 0x03, 0x00, 0x01]
             elif state == "ACCESS_ZONE":
-                logger.info("Handling opskyState: RESET")
+                logger.info("Handling opskyState: ACCESS_ZONE")
                 can_data = [0x02, 0x03, 0x00, 0x02]
             else:
                 logger.info(f"Handling opskyState: Unknown state {state}")
@@ -123,7 +123,7 @@ class CANModule:
             logger.error(f"Error in opsky_state_send: {e}")
             can_data = []
 
-        logger.info(f"opsky_state_send - {state}")
+        #logger.info(f"opsky_state_send - {state}")
         if can_data:
             can_payload = json.dumps({"OpSkyStateToCan": can_data})
             await ble_to_can_queue.put(can_payload)
