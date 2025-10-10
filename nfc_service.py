@@ -56,9 +56,7 @@ class NFCModule:
             num_devices = int(parts[1])
             device_list = [d.strip() for d in parts[2:2+num_devices]]
             allowed = set(device_list) & self._nfc_permitted_uids
-            print("Permitted devices from config:", self._nfc_permitted_uids)
-            print("Devices from card:", device_list)
-            print("Intersection:", allowed)
+            # ...existing code...
             if allowed:
                 self._last_userid = userid
                 logger.info(f"[NFC] User {userid} has access to: {allowed}")
@@ -72,6 +70,16 @@ class NFCModule:
 
     def __init__(self, loop=None):
         self.loop = loop or asyncio.get_event_loop()
+    # PN532 I2C Hardware Setup:
+    # - L0 = High, L1 = Low
+    # - DIP switch: turn ON I2C lines
+    # - RSTPDN = D20 (Jumper)
+    #
+    # PN532 UART Hardware Setup:
+    # - L0 = Low, L1 = Low
+    # - DIP switch: turn ON UART lines
+    # - RSTPDN = D20 (Jumper)
+    # - INT0 = D16
         self.init_pn532()
         # ZeroMQ PUB socket for NFC data
         self.ctx = zmq.asyncio.Context.instance()
@@ -88,13 +96,16 @@ class NFCModule:
 
     def init_pn532(self):
         try:
-            self.pn532 = PN532_UART(debug=False, reset=20)
+            #self.pn532 = PN532_UART(debug=False, reset=20)
+            self.pn532 = PN532_I2C(debug=False, reset=20, req=16)
+            logger.debug(f"[NFC INIT]: PN532_I2C instance created: {self.pn532}")
             ic, ver, rev, support = self.pn532.get_firmware_version()
             logger.info(f"[NFC INIT]: Found PN532 with firmware version: {ver}.{rev}")
             self.pn532.SAM_configuration()
             logger.info(f"[NFC INIT]: Service Initialized....")
         except Exception as e:
             logger.error(f"[NFC ERROR] Failed to initialize PN532: {e}")
+            logger.debug("[NFC ERROR] Exception details:", exc_info=True)
             self.pn532 = None
 
     async def listen_async(self):
