@@ -3,7 +3,7 @@ import logging
 SEND_INTERVAL   = 1.0  # seconds
 PGN_VALUE       = 0x00EF
 SOURCE_ADDRESS  = 0xDC
-DEST_ADDRESS    = 0xFF #0x19
+DEST_ADDRESS    = 0x19
 PRIORITY        = 6
 OPCODE_NFC_ID   = 0x0018
 
