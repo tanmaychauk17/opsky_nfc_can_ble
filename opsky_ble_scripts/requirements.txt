@@ -1,0 +1,7 @@
+bluez-peripheral==0.1.7
+cffi==2.0.0
+cryptography==46.0.2
+dbus-next==0.2.3
+pycparser==2.23
+pyzmq==27.1.0
+zmq==0.0.0
