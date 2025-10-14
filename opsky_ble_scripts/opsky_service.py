@@ -7,6 +7,8 @@ import logging
 import asyncio
 import zmq
 import zmq.asyncio
+import os
+import json
 
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,7 @@ PRIMARY_SERVICE_UUID = "6DF722E0-AC7B-4C63-8226-FFE665B82697"
 SENDTOMACHINE_CHAR_UUID = "6DF722E1-AC7B-4C63-8226-FFE665B82697"
 READFROMMACHINE_CHAR_UUID = "6DF722E2-AC7B-4C63-8226-FFE665B82697"
 PROTOCOL_VERSION_CHAR_UUID = "6DF722E3-AC7B-4C63-8226-FFE665B82697"
+UWB_CHAR_UUID = "6DF722E4-AC7B-4C63-8226-FFE665B82697"
 hack_response = 0x2000
 BYTEORDER = 'big'
 
@@ -97,6 +100,27 @@ class OpskyService(Service):
         self.sub_socket.connect(XPUB_ADDR)
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "canToBle")
         self.sub_socket.setsockopt(zmq.LINGER, 0)
+
+        # Load BLE advertising name from config for UWB functionality
+        self.ble_adv_name = self._load_ble_adv_name()
+
+        # UWB key storage
+        self.uwb_key = None
+
+    def _load_ble_adv_name(self):
+        """Load BLE advertising name from config.json"""
+        try:
+            BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+            with open(CONFIG_PATH) as f:
+                config = json.load(f)
+            return config.get("ble_adv_name", "OPSKY_DEVICE_DEFAULT")
+        except FileNotFoundError:
+            logger.warning(f"Config file not found, using default BLE name.")
+            return "OPSKY_DEVICE_DEFAULT"
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
+            return "OPSKY_DEVICE_DEFAULT"
 
     def _get_opcode_data(self, message):
         try:
@@ -306,13 +330,51 @@ class OpskyService(Service):
 
     @characteristic(PROTOCOL_VERSION_CHAR_UUID, CharFlags.READ)
     def read_version(self, options):
-        logger.info("📖📖 Attempting to read Protocol version")
+        logger.info(f"📖📖 Attempting to read Protocol version - returning version {self.protocol_version}")
         if self.session_state in [BLESessionState.IDLE, BLESessionState.CONNECTED]:
             self.session_state = BLESessionState.PROTOCOL_VERIFIED
             self.session_state = BLESessionState.WAITING_FOR_MDID
             asyncio.create_task(self._start_mdid_timeout())
         # Return protocol version as [0x00, version]
+        logger.info(f"[BLE TX] Protocol version response: [0x00, 0x{self.protocol_version:02X}]")
         return [0x00, self.protocol_version]
+
+    @characteristic(UWB_CHAR_UUID, CharFlags.READ | CharFlags.WRITE | CharFlags.NOTIFY)
+    def uwb_char(self, options):
+        """UWB characteristic - on read returns BLE advertisement name"""
+        logger.info(f"[UWB BLE] Read requested - returning BLE adv name: {self.ble_adv_name}")
+        # Convert string to bytes and then to list of integers
+        return list(self.ble_adv_name.encode('utf-8'))
+
+    @uwb_char.setter
+    def uwb_char(self, value, options):
+        """UWB characteristic - on write receives UWB key from mobile"""
+        logger.info(f"[UWB BLE RX] {' '.join(f'{b:02X}' for b in value)}")
+        try:
+            # Decode the received UWB key
+            msg = bytes(value).decode('utf-8', errors='ignore').strip()
+            logger.info(f"[UWB BLE] Received UWB key: {msg}")
+
+            # Store the UWB key
+            self.uwb_key = msg
+
+            # Forward UWB key to ZMQ for further processing
+            payload = json.dumps({"UwbKey": msg})
+            zmq_msg = f"uwbKey {payload}"
+            self.pub_socket.send_string(zmq_msg)
+            logger.info(f"[UWB BLE]: UWB key forwarded to ZMQ: {zmq_msg}")
+
+            # Send acknowledgment notification (optional - can be used for errors later)
+            ack_msg = b"UWB_KEY_RECEIVED"
+            self.uwb_char.changed(ack_msg)
+            logger.info(f"[UWB BLE TX] Notification sent: {ack_msg}")
+
+        except Exception as e:
+            logger.error(f"[UWB BLE] Error processing UWB key: {e}")
+            # Send error notification
+            error_msg = b"UWB_KEY_ERROR"
+            self.uwb_char.changed(error_msg)
+            logger.error(f"[UWB BLE TX] Error notification sent: {error_msg}")
 
     def on_ble_connected(self, device_path):
         logger.info(f"BLE Connected: device_path={device_path}")
