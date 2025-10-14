@@ -124,6 +124,27 @@ class OpskyService(Service):
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "canToBle")
         self.sub_socket.setsockopt(zmq.LINGER, 0)
 
+        # Load BLE advertising name from config for UWB functionality
+        self.ble_adv_name = self._load_ble_adv_name()
+
+        # UWB key storage
+        self.uwb_key = None
+
+    def _load_ble_adv_name(self):
+        """Load BLE advertising name from config.json"""
+        try:
+            BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+            with open(CONFIG_PATH) as f:
+                config = json.load(f)
+            return config.get("ble_adv_name", "OPSKY_DEVICE_DEFAULT")
+        except FileNotFoundError:
+            logger.warning(f"Config file not found, using default BLE name.")
+            return "OPSKY_DEVICE_DEFAULT"
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
+            return "OPSKY_DEVICE_DEFAULT"
+
     def _get_opcode_data(self, message):
         """
         Extracts response code, opcode, and data from incoming BLE message.
@@ -403,81 +424,57 @@ class OpskyService(Service):
     @characteristic(READWRITE_NOTIFY_CHAR_UUID, CharFlags.READ | CharFlags.WRITE | CharFlags.NOTIFY)
     def readwrite_notify_char(self, options):
         """
-        BLE GATT characteristic with read, write, and notify capabilities.
-        This method handles READ operations and returns advertising name from config.json.
-        Write operations are handled by the setter method below.
+        UWB/Notification characteristic - on read returns BLE advertisement name.
+        Same implementation as UWB characteristic in v2.
         """
-        logger.info(f"📖📖 Attempting to read {READWRITE_NOTIFY_CHAR_UUID}")
-        return self._handle_readwrite_notify_read(options)
+        logger.info(f"[UWB BLE] Read requested - returning BLE adv name: {self.ble_adv_name}")
+        # Convert string to bytes and then to list of integers
+        return list(self.ble_adv_name.encode('utf-8'))
 
     @readwrite_notify_char.setter
     def readwrite_notify_setter(self, value, options):
         """
-        Setter for write operations on the read/write/notify characteristic.
+        UWB/Notification characteristic - on write receives UWB key from mobile.
+        Same implementation as UWB characteristic in v2.
         """
+        logger.info(f"[UWB BLE RX] {' '.join(f'{b:02X}' for b in value)}")
         try:
-            logger.info(f"[RW_NOTIFY SETTER] {' '.join(f'{b:02X}' for b in value)}")
-            self._handle_readwrite_notify_write(value, options)
-        except Exception as e:
-            logger.error(f"Error in readwrite_notify_setter: {e}")
+            # Decode the received UWB key
+            msg = bytes(value).decode('utf-8', errors='ignore').strip()
+            logger.info(f"[UWB BLE] Received UWB key: {msg}")
 
-    def _handle_readwrite_notify_write(self, value, options):
-        """
-        Handle write operations to the read/write/notify characteristic.
-        """
-        try:
-            logger.info(f"[RW_NOTIFY] Processing write: {' '.join(f'{b:02X}' for b in value)}")
-            # Process the written data - can be customized based on requirements
-            # For now, echo the data back via notification
-            self._send_notification(value)
-        except Exception as e:
-            logger.error(f"Error in _handle_readwrite_notify_write: {e}")
+            # Store the UWB key
+            self.uwb_key = msg
 
-    def _handle_readwrite_notify_read(self, options):
-        """
-        Handle read operations from the read/write/notify characteristic.
-        Returns the advertising name from config.json as bytes.
-        """
-        try:
-            logger.info("[RW_NOTIFY] Processing read request")
-            
-            # Read advertising name from config.json
-            config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
-            try:
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                    adv_name = config.get('ble_adv_name', 'OPSKY_DEFAULT')
-                    # Convert string to bytes (UTF-8 encoded)
-                    adv_name_bytes = list(adv_name.encode('utf-8'))
-                    logger.info(f"[RW_NOTIFY READ] Advertising name: {adv_name}")
-                    logger.info(f"[RW_NOTIFY READ] {' '.join(f'{b:02X}' for b in adv_name_bytes)}")
-                    return adv_name_bytes
-            except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
-                logger.error(f"Error reading config.json: {e}")
-                # Fallback to default name
-                default_name = "OPSKY_DEFAULT"
-                default_bytes = list(default_name.encode('utf-8'))
-                logger.info(f"[RW_NOTIFY READ] Using default name: {default_name}")
-                logger.info(f"[RW_NOTIFY READ] {' '.join(f'{b:02X}' for b in default_bytes)}")
-                return default_bytes
-                
-        except Exception as e:
-            logger.error(f"Error in _handle_readwrite_notify_read: {e}")
-            return [0x00]  # Return error status
+            # Forward UWB key to ZMQ for further processing
+            payload = json.dumps({"UwbKey": msg})
+            zmq_msg = f"uwbKey {payload}"
+            self.pub_socket.send_string(zmq_msg)
+            logger.info(f"[UWB BLE]: UWB key forwarded to ZMQ: {zmq_msg}")
 
-    def _send_notification(self, data):
-        """
-        Send notification to connected BLE client via the read/write/notify characteristic.
-        """
-        # Not sending anything for now - keeping method blank
-        logger.debug(f"[RW_NOTIFY NOTIFICATION] Notification disabled: {' '.join(f'{b:02X}' for b in data)}")
-        pass
+            # Send acknowledgment notification (optional - can be used for errors later)
+            ack_msg = b"UWB_KEY_RECEIVED"
+            self.readwrite_notify_char.changed(ack_msg)
+            logger.info(f"[UWB BLE TX] Notification sent: {ack_msg}")
+
+        except Exception as e:
+            logger.error(f"[UWB BLE] Error processing UWB key: {e}")
+            # Send error notification
+            error_msg = b"UWB_KEY_ERROR"
+            self.readwrite_notify_char.changed(error_msg)
+            logger.error(f"[UWB BLE TX] Error notification sent: {error_msg}")
 
     def send_custom_notification(self, data):
         """
         Public method to send custom notifications from external code.
+        Uses the UWB/notification characteristic (same as v2 implementation).
         """
-        self._send_notification(data)
+        try:
+            logger.info(f"[UWB BLE NOTIFICATION] {' '.join(f'{b:02X}' for b in data)}")
+            # Trigger notification by changing the characteristic value
+            self.readwrite_notify_char.changed(bytes(data))
+        except Exception as e:
+            logger.error(f"Error in send_custom_notification: {e}")
 
     def on_ble_connected(self, device_path):
         """
