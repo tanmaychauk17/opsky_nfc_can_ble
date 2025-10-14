@@ -1,0 +1,4 @@
+bluez-peripheral==0.1.7
+dbus-next==0.2.3
+pyzmq==27.1.0
+zmq==0.0.0

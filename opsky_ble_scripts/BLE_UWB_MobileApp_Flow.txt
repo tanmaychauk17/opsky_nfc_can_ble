@@ -1,0 +1,53 @@
+
+# BLE-UWB Ranging Flow for Mobile App Integration
+
+## Overview
+This document describes the BLE and UWB interaction flow between the Raspberry Pi (with DWM3001CDK UWB chip) and iPhone(s) for secure, session-based UWB ranging.
+
+---
+
+## 1. BLE Advertising
+- The Raspberry Pi advertises a BLE service ("UWB Ranging Service") with a single characteristic (UUID: E1C7A1B1-7E2A-4B1A-9C1D-1F2E3D4C5B6A).
+- The characteristic supports **READ**, **WRITE**, and **INDICATE/NOTIFY**.
+
+## 2. BLE Connection
+- Only one iPhone at a time can connect to the Pi as a BLE peripheral.
+- The iPhone discovers the GATT service and characteristic after connecting.
+
+## 3. Session Identification (Token Exchange)
+- The iPhone generates a UWB discovery token using the Nearby Interaction API.
+- The iPhone writes the token to the BLE characteristic in the following format:
+  - `TOKEN:<token>`
+  - `<token>` should be a hex or base64 string representation of the discovery token.
+- The Pi receives the token and forwards it to the UWB chip for peer filtering.
+
+## 4. Ranging Trigger & Notification
+- The iPhone writes the command `RANGE` to the BLE characteristic to trigger UWB ranging.
+- The Pi sends the appropriate command to the UWB chip to start ranging.
+- **The Pi does NOT send the raw distance to the iPhone.**
+- The Pi determines the zone (e.g., ACCESS, WELCOME, NO_ZONE) based on the distance and acts on it internally.
+- BLE notifications are used only to provide command responses (e.g., `OK`, `ERROR`, `TOKEN SET`) or error messages to the iPhone.
+- (Optional) If needed in the future, the Pi can send zone updates (e.g., `ZONE:ACCESS`) via BLE notification.
+
+## 5. BLE Read (Optional)
+- The iPhone can read the characteristic, but the Pi will not return the distance; it may return a status or be reserved for future use.
+
+---
+
+## BLE Characteristic Command Summary
+- **Write `TOKEN:<token>`** — Set the UWB peer filter for this session.
+- **Write `RANGE`** — Trigger UWB ranging; Pi will process and act on the result internally.
+- **Read** — Reserved for future use or status.
+- **Notification** — Pi sends only command responses or errors (not distance).
+
+---
+
+## Notes
+- Only one iPhone can connect and range at a time.
+- The token must be generated per session and is unique to each iPhone.
+- All communication is via a single BLE characteristic for simplicity.
+- The Pi handles all distance and zone logic internally and only notifies the iPhone of command responses or errors.
+
+---
+
+For questions or integration support, contact the Pi-side development team.
