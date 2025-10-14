@@ -9,6 +9,8 @@ import logging
 import asyncio
 import zmq
 import zmq.asyncio
+import json
+import os
 
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,7 @@ PRIMARY_SERVICE_UUID = "6DF722E0-AC7B-4C63-8226-FFE665B82697"
 SENDTOMACHINE_CHAR_UUID = "6DF722E1-AC7B-4C63-8226-FFE665B82697"
 READFROMMACHINE_CHAR_UUID = "6DF722E2-AC7B-4C63-8226-FFE665B82697"
 PROTOCOL_VERSION_CHAR_UUID = "6DF722E3-AC7B-4C63-8226-FFE665B82697"
+READWRITE_NOTIFY_CHAR_UUID = "6DF722E4-AC7B-4C63-8226-FFE665B82697"
 
 # Special response code for internal use
 hack_response = 0x2000
@@ -396,6 +399,93 @@ class OpskyService(Service):
             self.session_state = BLESessionState.WAITING_FOR_MDID
             asyncio.create_task(self._start_mdid_timeout())
         return [0x00, self.protocol_version]
+
+    @characteristic(READWRITE_NOTIFY_CHAR_UUID, CharFlags.READ | CharFlags.WRITE | CharFlags.NOTIFY)
+    def readwrite_notify_char(self, value: bytes = None, options=None):
+        """
+        BLE GATT characteristic with read, write, and notify capabilities.
+        Handles bidirectional communication and can send notifications to client.
+        """
+        if value is not None:
+            # Write operation
+            logger.info(f"[RW_NOTIFY WRITE] {' '.join(f'{b:02X}' for b in value)}")
+            self._handle_readwrite_notify_write(value, options)
+        else:
+            # Read operation
+            logger.info(f"📖📖 Attempting to read {READWRITE_NOTIFY_CHAR_UUID}")
+            return self._handle_readwrite_notify_read(options)
+
+    @readwrite_notify_char.setter
+    def readwrite_notify_setter(self, value, options):
+        """
+        Setter for write operations on the read/write/notify characteristic.
+        """
+        try:
+            logger.info(f"[RW_NOTIFY SETTER] {' '.join(f'{b:02X}' for b in value)}")
+            self._handle_readwrite_notify_write(value, options)
+        except Exception as e:
+            logger.error(f"Error in readwrite_notify_setter: {e}")
+
+    def _handle_readwrite_notify_write(self, value, options):
+        """
+        Handle write operations to the read/write/notify characteristic.
+        """
+        try:
+            logger.info(f"[RW_NOTIFY] Processing write: {' '.join(f'{b:02X}' for b in value)}")
+            # Process the written data - can be customized based on requirements
+            # For now, echo the data back via notification
+            self._send_notification(value)
+        except Exception as e:
+            logger.error(f"Error in _handle_readwrite_notify_write: {e}")
+
+    def _handle_readwrite_notify_read(self, options):
+        """
+        Handle read operations from the read/write/notify characteristic.
+        Returns the advertising name from config.json as bytes.
+        """
+        try:
+            logger.info("[RW_NOTIFY] Processing read request")
+            
+            # Read advertising name from config.json
+            config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    adv_name = config.get('ble_adv_name', 'OPSKY_DEFAULT')
+                    # Convert string to bytes (UTF-8 encoded)
+                    adv_name_bytes = list(adv_name.encode('utf-8'))
+                    logger.info(f"[RW_NOTIFY READ] Advertising name: {adv_name}")
+                    logger.info(f"[RW_NOTIFY READ] {' '.join(f'{b:02X}' for b in adv_name_bytes)}")
+                    return adv_name_bytes
+            except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+                logger.error(f"Error reading config.json: {e}")
+                # Fallback to default name
+                default_name = "OPSKY_DEFAULT"
+                default_bytes = list(default_name.encode('utf-8'))
+                logger.info(f"[RW_NOTIFY READ] Using default name: {default_name}")
+                logger.info(f"[RW_NOTIFY READ] {' '.join(f'{b:02X}' for b in default_bytes)}")
+                return default_bytes
+                
+        except Exception as e:
+            logger.error(f"Error in _handle_readwrite_notify_read: {e}")
+            return [0x00]  # Return error status
+
+    def _send_notification(self, data):
+        """
+        Send notification to connected BLE client via the read/write/notify characteristic.
+        """
+        try:
+            logger.info(f"[RW_NOTIFY NOTIFICATION] {' '.join(f'{b:02X}' for b in data)}")
+            # Trigger notification by changing the characteristic value
+            self.readwrite_notify_char.changed(bytes(data))
+        except Exception as e:
+            logger.error(f"Error in _send_notification: {e}")
+
+    def send_custom_notification(self, data):
+        """
+        Public method to send custom notifications from external code.
+        """
+        self._send_notification(data)
 
     def on_ble_connected(self, device_path):
         """
