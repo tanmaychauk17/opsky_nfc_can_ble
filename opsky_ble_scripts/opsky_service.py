@@ -393,7 +393,7 @@ class OpskyService(Service):
         BLE GATT read handler for protocol version negotiation.
         Triggers MDID timeout and state transition.
         """
-        logger.info("📖📖 Attempting to read Protocol version")
+        logger.info(f"📖📖 Attempting to read Protocol version - sending version {self.protocol_version}")
         if self.session_state in [BLESessionState.IDLE, BLESessionState.CONNECTED]:
             self.session_state = BLESessionState.PROTOCOL_VERIFIED
             self.session_state = BLESessionState.WAITING_FOR_MDID
@@ -469,12 +469,9 @@ class OpskyService(Service):
         """
         Send notification to connected BLE client via the read/write/notify characteristic.
         """
-        try:
-            logger.info(f"[RW_NOTIFY NOTIFICATION] {' '.join(f'{b:02X}' for b in data)}")
-            # Trigger notification by changing the characteristic value
-            self.readwrite_notify_char.changed(bytes(data))
-        except Exception as e:
-            logger.error(f"Error in _send_notification: {e}")
+        # Not sending anything for now - keeping method blank
+        logger.debug(f"[RW_NOTIFY NOTIFICATION] Notification disabled: {' '.join(f'{b:02X}' for b in data)}")
+        pass
 
     def send_custom_notification(self, data):
         """
