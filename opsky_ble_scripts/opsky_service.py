@@ -97,7 +97,7 @@ class OpskyService(Service):
     Main BLE GATT service for Opsky protocol, handling authentication,
     command routing, and state management. Integrates with CAN/NFC via ZMQ.
     """
-    def __init__(self, connection_monitor=None, protocol_version=2):
+    def __init__(self, connection_monitor=None, protocol_version=3):
         super().__init__(PRIMARY_SERVICE_UUID, True)
         self.ServiceID = PRIMARY_SERVICE_UUID
         # Track authentication and session state
