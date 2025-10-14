@@ -401,19 +401,14 @@ class OpskyService(Service):
         return [0x00, self.protocol_version]
 
     @characteristic(READWRITE_NOTIFY_CHAR_UUID, CharFlags.READ | CharFlags.WRITE | CharFlags.NOTIFY)
-    def readwrite_notify_char(self, value: bytes = None, options=None):
+    def readwrite_notify_char(self, options):
         """
         BLE GATT characteristic with read, write, and notify capabilities.
-        Handles bidirectional communication and can send notifications to client.
+        This method handles READ operations and returns advertising name from config.json.
+        Write operations are handled by the setter method below.
         """
-        if value is not None:
-            # Write operation
-            logger.info(f"[RW_NOTIFY WRITE] {' '.join(f'{b:02X}' for b in value)}")
-            self._handle_readwrite_notify_write(value, options)
-        else:
-            # Read operation
-            logger.info(f"📖📖 Attempting to read {READWRITE_NOTIFY_CHAR_UUID}")
-            return self._handle_readwrite_notify_read(options)
+        logger.info(f"📖📖 Attempting to read {READWRITE_NOTIFY_CHAR_UUID}")
+        return self._handle_readwrite_notify_read(options)
 
     @readwrite_notify_char.setter
     def readwrite_notify_setter(self, value, options):
