@@ -412,7 +412,11 @@ class OpskyService(Service):
                                         logger.info(f"[PROTOCOL V3] Opcode {opcode:04X} signature verified for MDID {self.authenticated_mdid.hex().upper()}.")
                                         # Forward verified command to CAN system
                                         self._forward_command_to_can(opcode, payload)
-                                        # Note: No response sent - signature verification successful
+                                        # Send PENDING response like Protocol v2
+                                        tosend = self._set_response_data(opcode, OpskyCommands.PENDING.value, [])
+                                        logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
+                                        self.send_machine.changed(bytes(tosend))
+                                        logger.info(f"[OPSKY_BLE]: Pending response sent on BLE {tosend}")
                                         return
                                     else:
                                         logger.warning(f"[PROTOCOL V3] Opcode signature verification failed for MDID {self.authenticated_mdid.hex().upper()}.")
@@ -465,7 +469,11 @@ class OpskyService(Service):
                         logger.info(f"[PROTOCOL V3] Opcode {opcode:04X} signature verified for MDID {self.authenticated_mdid.hex().upper()}.")
                         # Forward verified command to CAN system
                         self._forward_command_to_can(opcode, payload)
-                        # Note: No response sent - signature verification successful
+                        # Send PENDING response like Protocol v2
+                        tosend = self._set_response_data(opcode, OpskyCommands.PENDING.value, [])
+                        logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
+                        self.send_machine.changed(bytes(tosend))
+                        logger.info(f"[OPSKY_BLE]: Pending response sent on BLE {tosend}")
                     else:
                         logger.warning(f"[PROTOCOL V3] Opcode signature verification failed for MDID {self.authenticated_mdid.hex().upper()}.")
                         # Note: No response sent - just disconnect on signature failure
