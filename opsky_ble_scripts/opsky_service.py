@@ -301,9 +301,18 @@ class OpskyService(Service):
                     ENFORCE_MDID_LENGTH = True  # Set to True to require exactly 6 bytes
                     if ENFORCE_MDID_LENGTH and len(data) != 6:
                         logger.warning(f"[BLE RX] MDID length invalid: {len(data)} bytes (expected 6). Rejecting.")
+                        # Send normal error response
                         tosend = self._set_response_data(opcode, OpskyCommands.ERROR.value, [0x00])
                         logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
                         self.send_machine.changed(bytes(tosend))
+                        # Send unsolicited event for MDID error (FFFD 0002 00 00)
+                        unsolicited = self._set_unsolicited_opcode_notification_data(
+                            OpskyCommands.UNSOLICITED_EVENT.value,
+                            OpskyCommands.SUCCESS.value,
+                            [0x00, 0x02]
+                        )
+                        logger.info(f"[BLE TX] (UNSOLICITED) {' '.join(f'{b:02X}' for b in unsolicited)}")
+                        self.send_machine.changed(bytes(unsolicited))
                         if self.connection_monitor and self.connectedDevice:
                             logger.info("Disconnecting BLE device due to invalid MDID length.")
                             asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
@@ -335,11 +344,29 @@ class OpskyService(Service):
                         logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
                         self.send_machine.changed(bytes(tosend))
                         self.servicestate = AuthState.USER_AUTHENTICATED
+                        # Publish authenticated status to ZMQ immediately
+                        try:
+                            device_path = self.connectedDevice if self.connectedDevice else "unknown"
+                            import json
+                            auth_msg = json.dumps({"status": "authenticated", "device": device_path})
+                            self.pub_socket.send_string(f"bleStatus {auth_msg}")
+                            logger.info(f"Published BLE status: {auth_msg}")
+                        except Exception as e:
+                            logger.error(f"Failed to publish authenticated status to ZMQ: {e}")
                     else:
                         logger.info("Authentication failed.")
+                        # Send normal error response
                         tosend = self._set_response_data(opcode, OpskyCommands.ERROR.value, [0x00])
                         logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
                         self.send_machine.changed(bytes(tosend))
+                        # Send unsolicited event for auth failure (FFFD 0002 00 00)
+                        unsolicited = self._set_unsolicited_opcode_notification_data(
+                            OpskyCommands.UNSOLICITED_EVENT.value,
+                            OpskyCommands.SUCCESS.value,
+                            [0x00, 0x02]
+                        )
+                        logger.info(f"[BLE TX] (UNSOLICITED) {' '.join(f'{b:02X}' for b in unsolicited)}")
+                        self.send_machine.changed(bytes(unsolicited))
                         if self.connection_monitor and self.connectedDevice:
                             logger.info("Disconnecting BLE device due to failed authentication.")
                             asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
@@ -373,11 +400,22 @@ class OpskyService(Service):
                         logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
                         self.send_machine.changed(bytes(tosend))
                         self.servicestate = AuthState.USER_AUTHENTICATED
+                        # Publish authenticated status to ZMQ immediately
+                        try:
+                            device_path = self.connectedDevice if self.connectedDevice else "unknown"
+                            import json
+                            auth_msg = json.dumps({"status": "authenticated", "device": device_path})
+                            self.pub_socket.send_string(f"bleStatus {auth_msg}")
+                            logger.info(f"Published BLE status: {auth_msg}")
+                        except Exception as e:
+                            logger.error(f"Failed to publish authenticated status to ZMQ: {e}")
                     else:
                         logger.warning(f"[PROTOCOL V3] Signature verification failed for MDID {mdid.hex().upper()}")
                         tosend = self._set_response_data(opcode, OpskyCommands.ERROR.value, [0x00])
                         logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
                         self.send_machine.changed(bytes(tosend))
+                        # TODO: Add unsolicited event for failed signature verification (like Protocol v2)
+                        # This would improve error handling consistency between protocols
                         if self.connection_monitor and self.connectedDevice:
                             logger.info("Disconnecting BLE device due to failed signature verification.")
                             asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
@@ -387,6 +425,8 @@ class OpskyService(Service):
                     # Most requests are just OPCODE + SIGNATURE (no payload in data)
                     if len(data) < 8:  # Minimal DER signature
                         logger.warning(f"[PROTOCOL V3] Data too short for signature. Got {len(data)} bytes.")
+                        # TODO: Consider sending ERROR response instead of silent return for better debugging
+                        # Current silent behavior prioritizes security but makes debugging harder
                         # Note: No response sent - just return on insufficient data
                         return
                     
@@ -420,6 +460,8 @@ class OpskyService(Service):
                                         return
                                     else:
                                         logger.warning(f"[PROTOCOL V3] Opcode signature verification failed for MDID {self.authenticated_mdid.hex().upper()}.")
+                                        # TODO: Consider sending ERROR response before disconnect for better debugging
+                                        # Current silent behavior prioritizes security but makes debugging harder
                                         # Note: No response sent - just disconnect on signature failure
                                         if self.connection_monitor and self.connectedDevice:
                                             logger.info("Disconnecting BLE device due to failed opcode signature.")
@@ -458,6 +500,8 @@ class OpskyService(Service):
                     if signature_start == -1:
                         logger.warning(f"[PROTOCOL V3] Could not find valid DER signature in data.")
                         logger.warning(f"[PROTOCOL V3] Searched data: {' '.join(f'{b:02X}' for b in data)}")
+                        # TODO: Consider sending ERROR response instead of silent return for better debugging
+                        # Current silent behavior prioritizes security but makes debugging harder
                         # Note: No response sent - just return on invalid DER
                         return
                     
@@ -476,6 +520,8 @@ class OpskyService(Service):
                         logger.info(f"[OPSKY_BLE]: Pending response sent on BLE {tosend}")
                     else:
                         logger.warning(f"[PROTOCOL V3] Opcode signature verification failed for MDID {self.authenticated_mdid.hex().upper()}.")
+                        # TODO: Consider sending ERROR response before disconnect for better debugging
+                        # Current silent behavior prioritizes security but makes debugging harder
                         # Note: No response sent - just disconnect on signature failure
                         if self.connection_monitor and self.connectedDevice:
                             logger.info("Disconnecting BLE device due to failed opcode signature.")
