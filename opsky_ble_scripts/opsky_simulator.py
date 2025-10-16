@@ -256,11 +256,11 @@ async def main():
     simulator = Opsky_Simulator(ble_adv_name)
     simulator.add_service(OpskyService())
     canToBle_listen_task = asyncio.create_task(simulator.listen_canToBle_data())
-    rssi_monitor = asyncio.create_task(simulator.poll_rssi_all(interval=2))
+    #rssi_monitor = asyncio.create_task(simulator.poll_rssi_all(interval=2))
     await asyncio.gather(
         simulator.start(),
         canToBle_listen_task
-        ,rssi_monitor
+        #,rssi_monitor
     )
 
 if __name__ == "__main__":

@@ -663,8 +663,14 @@ class OpskyService(Service):
         self.session_state = BLESessionState.CONNECTED
         self.connectedDevice = device_path
 
-        # Publish default MDID to CAN service on new connection
+        # Publish default MDID and WELCOME_ZONE on new connection
         self._publish_mdid_to_can("FFFFFFFFFFFF")
+        try:
+            welcome_msg = "opskyState WELCOME_ZONE"
+            self.pub_socket.send_string(welcome_msg)
+            logger.info(f"[DEFAULT ZONE] Published to CAN: {welcome_msg}")
+        except Exception as e:
+            logger.error(f"[DEFAULT ZONE] Error publishing WELCOME_ZONE: {e}")
 
     def on_ble_disconnected(self):
         """
@@ -676,5 +682,11 @@ class OpskyService(Service):
         self.mdid = None
         self.connectedDevice = None
 
-        # Publish default MDID to CAN service on disconnection
+        # Publish default MDID and NO_ZONE on disconnection
         self._publish_mdid_to_can("FFFFFFFFFFFF")
+        try:
+            no_zone_msg = "opskyState NO_ZONE"
+            self.pub_socket.send_string(no_zone_msg)
+            logger.info(f"[NO ZONE] Published to CAN: {no_zone_msg}")
+        except Exception as e:
+            logger.error(f"[NO ZONE] Error publishing NO_ZONE: {e}")

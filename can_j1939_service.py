@@ -57,7 +57,7 @@ class CANModule:
         self.pub_socket.connect(XSUB_ADDR)
         self.pub_socket.setsockopt(zmq.LINGER, 0)
         self.PAAK_State = False # false = disabled, true = enabled
-        self.work_zone  = 0  # 0 = no zone, 1 = welcome zone, 2 = access zone
+        self.work_zone  = 1  # 0 = no zone, 1 = welcome zone, 2 = access zone
         self.authenticated_mdid = "FFFFFFFFFFFF"  # Default to all FF, updated on auth
 
     def handle_can_opcode(self, filtered_data):
@@ -127,12 +127,15 @@ class CANModule:
             elif state == "NO_ZONE":
                 logger.info("Handling opskyState: NO_ZONE")
                 can_data = [0x02, 0x03, 0x00, 0x00]
+                self.work_zone = 0
             elif state == "WELCOME_ZONE":
                 logger.info("Handling opskyState: WELCOME_ZONE")
                 can_data = [0x02, 0x03, 0x00, 0x01]
+                self.work_zone = 1
             elif state == "ACCESS_ZONE":
                 logger.info("Handling opskyState: ACCESS_ZONE")
                 can_data = [0x02, 0x03, 0x00, 0x02]
+                self.work_zone = 2
             elif state.startswith("MDID_"):
                 # Handle MDID updates: MDID_FF0000000001 or MDID_FFFFFFFFFFFF
                 mdid_value = state[5:]  # Remove "MDID_" prefix
