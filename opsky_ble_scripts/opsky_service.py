@@ -132,6 +132,20 @@ class OpskyService(Service):
         # UWB key storage
         self.uwb_key = None
 
+    def _publish_mdid_to_can(self, mdid_hex: str):
+        """
+        Publish MDID to CAN service via opskyState topic.
+
+        Args:
+            mdid_hex: MDID as hex string (e.g., "FF0000000001" or "FFFFFFFFFFFF")
+        """
+        try:
+            mdid_msg = f"opskyState MDID_{mdid_hex}"
+            self.pub_socket.send_string(mdid_msg)
+            logger.info(f"[MDID] Published to CAN: {mdid_msg}")
+        except Exception as e:
+            logger.error(f"[MDID] Error publishing to CAN: {e}")
+
     def _load_ble_adv_name(self):
         """Load BLE advertising name from config.json"""
         try:
@@ -262,7 +276,7 @@ class OpskyService(Service):
             can_data = list(opcode.to_bytes(2, byteorder=BYTEORDER))
             if payload:
                 can_data.extend(list(payload))
-            
+
             json_payload = json.dumps({"BleToCan": can_data})
             msg = f"bleToCan {json_payload}"
             self.pub_socket.send_string(msg)
@@ -353,6 +367,13 @@ class OpskyService(Service):
                             logger.info(f"Published BLE status: {auth_msg}")
                         except Exception as e:
                             logger.error(f"Failed to publish authenticated status to ZMQ: {e}")
+
+                        # Publish authenticated MDID to CAN service (Protocol v2)
+                        if self.mdid and len(self.mdid) >= 6:
+                            mdid_hex = ''.join(f'{b:02X}' for b in self.mdid[:6])
+                            self._publish_mdid_to_can(mdid_hex)
+                        else:
+                            logger.warning("Protocol v2: Invalid MDID for CAN publishing")
                     else:
                         logger.info("Authentication failed.")
                         # Send normal error response
@@ -409,6 +430,10 @@ class OpskyService(Service):
                             logger.info(f"Published BLE status: {auth_msg}")
                         except Exception as e:
                             logger.error(f"Failed to publish authenticated status to ZMQ: {e}")
+
+                        # Publish authenticated MDID to CAN service
+                        mdid_hex = mdid.hex().upper()
+                        self._publish_mdid_to_can(mdid_hex)
                     else:
                         logger.warning(f"[PROTOCOL V3] Signature verification failed for MDID {mdid.hex().upper()}")
                         tosend = self._set_response_data(opcode, OpskyCommands.ERROR.value, [0x00])
@@ -429,9 +454,9 @@ class OpskyService(Service):
                         # Current silent behavior prioritizes security but makes debugging harder
                         # Note: No response sent - just return on insufficient data
                         return
-                    
+
                     logger.info(f"[PROTOCOL V3] Parsing opcode 0x{opcode:04X}, data length: {len(data)}")
-                    
+
                     # For most commands, data contains only DER signature (starts with 0x30)
                     # Check if data starts with DER signature (0x30)
                     if len(data) > 0 and data[0] == 0x30:
@@ -447,7 +472,7 @@ class OpskyService(Service):
                                     payload = bytes()  # Empty payload
                                     signature = bytes(data)
                                     logger.info(f"[PROTOCOL V3] Opcode: 0x{opcode:04X}, Empty payload, Signature length: {len(signature)}")
-                                    
+
                                     if verify_opcode_signature_v3(opcode, payload, signature, self.authenticated_mdid.hex()):
                                         logger.info(f"[PROTOCOL V3] Opcode {opcode:04X} signature verified for MDID {self.authenticated_mdid.hex().upper()}.")
                                         # Forward verified command to CAN system
@@ -467,7 +492,7 @@ class OpskyService(Service):
                                             logger.info("Disconnecting BLE device due to failed opcode signature.")
                                             asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
                                         return
-                    
+
                     # Fallback: Look for DER signature anywhere in the data (for commands with payload)
                     logger.info(f"[PROTOCOL V3] Data doesn't start with DER signature, searching for payload+signature split...")
                     signature_start = -1
@@ -490,13 +515,13 @@ class OpskyService(Service):
                                         header_size = 2 + length_bytes  # 0x30 + length encoding
                                     else:
                                         continue  # Not enough bytes for length encoding
-                                
+
                                 # Verify the DER signature length matches remaining data
                                 if i + header_size + der_length == len(data):
                                     signature_start = i
                                     logger.info(f"[PROTOCOL V3] Found valid DER signature at position {i}, length: {der_length}")
                                     break
-                    
+
                     if signature_start == -1:
                         logger.warning(f"[PROTOCOL V3] Could not find valid DER signature in data.")
                         logger.warning(f"[PROTOCOL V3] Searched data: {' '.join(f'{b:02X}' for b in data)}")
@@ -504,11 +529,11 @@ class OpskyService(Service):
                         # Current silent behavior prioritizes security but makes debugging harder
                         # Note: No response sent - just return on invalid DER
                         return
-                    
+
                     payload = bytes(data[:signature_start])
                     signature = bytes(data[signature_start:])
                     logger.info(f"[PROTOCOL V3] Opcode: 0x{opcode:04X}, Payload length: {len(payload)}, Signature length: {len(signature)}")
-                    
+
                     if verify_opcode_signature_v3(opcode, payload, signature, self.authenticated_mdid.hex()):
                         logger.info(f"[PROTOCOL V3] Opcode {opcode:04X} signature verified for MDID {self.authenticated_mdid.hex().upper()}.")
                         # Forward verified command to CAN system
@@ -636,6 +661,9 @@ class OpskyService(Service):
         self.session_state = BLESessionState.CONNECTED
         self.connectedDevice = device_path
 
+        # Publish default MDID to CAN service on new connection
+        self._publish_mdid_to_can("FFFFFFFFFFFF")
+
     def on_ble_disconnected(self):
         """
         BLE disconnection event handler. Resets session state and clears sensitive data.
@@ -645,3 +673,6 @@ class OpskyService(Service):
         self.challenge = None
         self.mdid = None
         self.connectedDevice = None
+
+        # Publish default MDID to CAN service on disconnection
+        self._publish_mdid_to_can("FFFFFFFFFFFF")

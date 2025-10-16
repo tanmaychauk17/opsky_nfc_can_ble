@@ -35,7 +35,9 @@ class CANModule:
         self.ca = None
         self.nfc_data = None
         self.nfc_data_pending = False
+        # ZMQ for communication with BLE service  
         self.ble_status = None  # <-- Add class-level variable for BLE status
+        self.authenticated_mdid = "FFFFFFFFFFFF"  # Default MDID (all FF)
         self.send_interval = send_interval
         self.pgn = pgn
         self.source_address = source_address
@@ -56,6 +58,7 @@ class CANModule:
         self.pub_socket.setsockopt(zmq.LINGER, 0)
         self.PAAK_State = False # false = disabled, true = enabled
         self.work_zone  = 0  # 0 = no zone, 1 = welcome zone, 2 = access zone
+        self.authenticated_mdid = "FFFFFFFFFFFF"  # Default to all FF, updated on auth
 
     def handle_can_opcode(self, filtered_data):
         """
@@ -65,7 +68,7 @@ class CANModule:
         """
         if len(filtered_data) >= 2:
             opcode = (filtered_data[0] << 8) | filtered_data[1]
-            CAN_ONLY_OPCODES = [0x0204, 0x0202]  # Replace with your actual opcodes
+            CAN_ONLY_OPCODES = [0x0204, 0x0202, 0x0002]  # Added 0x0002 for Get MDID
 
             if opcode in CAN_ONLY_OPCODES:
                 can_data = []
@@ -76,6 +79,21 @@ class CANModule:
                 if opcode == 0x0202:    #get the PAAK state - enabled or disabled
                     paak_state_byte = 0x00 if self.PAAK_State else 0x01
                     can_data = [0x02, 0x02, 0x00, paak_state_byte]  # sending disabled by default
+
+                if opcode == 0x0002:    #get the MDID - return current authenticated MDID
+                    # Convert hex string to bytes: "FF0000000001" -> [255, 0, 0, 0, 0, 1]
+                    try:
+                        mdid_bytes = [int(self.authenticated_mdid[i:i+2], 16) for i in range(0, 12, 2)]
+                        can_data = [0x00, 0x02, 0x00] + mdid_bytes  # 0x0002 response + 6 MDID bytes
+                        logger.info(f"GET_MDID response: MDID={self.authenticated_mdid}, bytes={mdid_bytes}")
+                    except Exception as e:
+                        logger.error(f"Error converting MDID to bytes: {e}")
+                        # Send default MDID on error
+                        can_data = [0x00, 0x02, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+
+#TODO : add response for following opcodes
+# - Get MDID ✅ COMPLETED - returns current authenticated MDID  
+# - Additional opcodes as needed 
 
                 can_payload = json.dumps({"CanOnlyResponse": can_data})
                 self.loop.call_soon_threadsafe(ble_to_can_queue.put_nowait, can_payload)
@@ -115,6 +133,15 @@ class CANModule:
             elif state == "ACCESS_ZONE":
                 logger.info("Handling opskyState: ACCESS_ZONE")
                 can_data = [0x02, 0x03, 0x00, 0x02]
+            elif state.startswith("MDID_"):
+                # Handle MDID updates: MDID_FF0000000001 or MDID_FFFFFFFFFFFF
+                mdid_value = state[5:]  # Remove "MDID_" prefix
+                if len(mdid_value) == 12:  # Valid 6-byte hex string
+                    self.authenticated_mdid = mdid_value.upper()
+                    logger.info(f"Updated authenticated MDID: {self.authenticated_mdid}")
+                else:
+                    logger.warning(f"Invalid MDID format: {mdid_value}, keeping current: {self.authenticated_mdid}")
+                can_data = []  # No CAN data needed for MDID storage
             else:
                 logger.info(f"Handling opskyState: Unknown state {state}")
                 can_data = []
