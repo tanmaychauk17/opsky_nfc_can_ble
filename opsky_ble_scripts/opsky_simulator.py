@@ -73,7 +73,10 @@ class Opsky_Simulator:
         self.pub_socket = self.ctx.socket(zmq.PUB)
         self.sub_socket = self.ctx.socket(zmq.SUB)
 
-        # Import XPUB_ADDR and XSUB_ADDR
+        # Import XPUB_ADDR and XSUB_ADDR from parent directory
+        import sys
+        import os
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from zmqhub import XPUB_ADDR, XSUB_ADDR
 
         # Bind or connect sockets

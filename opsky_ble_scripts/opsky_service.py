@@ -119,6 +119,8 @@ class OpskyService(Service):
         self.ctx = zmq.asyncio.Context.instance()
         self.pub_socket = self.ctx.socket(zmq.PUB)
         self.sub_socket = self.ctx.socket(zmq.SUB)
+        import sys
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from zmqhub import XSUB_ADDR, XPUB_ADDR
         self.pub_socket.connect(XSUB_ADDR)
         self.pub_socket.setsockopt(zmq.LINGER, 0)
