@@ -136,3 +136,35 @@ def verify_opcode_signature_v3(opcode: int, payload: bytes, signature: bytes, md
     except Exception as e:
         logger.error(f"[ECDSA] Unexpected error: {e}")
         return False
+
+def get_device_private_key():
+    """
+    Load the device's private key for signing responses.
+    Uses the first available private key (ff0000000001).
+    """
+    filename = "private_key_ff0000000001.pem"
+    path = os.path.join(KEYS_DIR, filename)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Device private key not found: {path}")
+    
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+    with open(path, 'rb') as f:
+        pem_data = f.read()
+    return load_pem_private_key(pem_data, password=None)
+
+def sign_data(data: bytes) -> bytes:
+    """
+    Sign data using the device's private key for Protocol v3 responses.
+    - data: bytes to sign
+    Returns DER-encoded signature bytes.
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        logger.info(f"[ECDSA] Signing data: {len(data)} bytes")
+        private_key = get_device_private_key()
+        signature = private_key.sign(data, ec.ECDSA(hashes.SHA256()))
+        logger.info(f"[ECDSA] Signature created: {len(signature)} bytes")
+        return signature
+    except Exception as e:
+        logger.error(f"[ECDSA] Error signing data: {e}")
+        raise

@@ -109,6 +109,7 @@ class OpskyService(Service):
         self.session_timer = None
         self.challenge = None
         self.mdid = None
+        self.authenticated_mdid = None  # For Protocol v3
         self.connection_monitor = connection_monitor
         self.connectedDevice = None  # Set on BLE connect
         
@@ -133,20 +134,57 @@ class OpskyService(Service):
 
         # UWB key storage
         self.uwb_key = None
+        
+        # For Protocol v3: Start ZMQ listener for CAN responses
+        if self.protocol_version == 3:
+            asyncio.create_task(self._listen_can_responses())
 
     def _publish_mdid_to_can(self, mdid_hex: str):
         """
-        Publish MDID to CAN service via opskyState topic.
-
-        Args:
-            mdid_hex: MDID as hex string (e.g., "FF0000000001" or "FFFFFFFFFFFF")
+        Publishes MDID to CAN service for tracking authenticated devices.
         """
         try:
-            mdid_msg = f"opskyState MDID_{mdid_hex}"
-            self.pub_socket.send_string(mdid_msg)
-            logger.info(f"[MDID] Published to CAN: {mdid_msg}")
+            payload = json.dumps({"mdid": mdid_hex})
+            msg = f"opskyMDID {payload}"
+            self.pub_socket.send_string(msg)
+            logger.info(f"[MDID PUBLISH] Published to CAN: {msg}")
         except Exception as e:
-            logger.error(f"[MDID] Error publishing to CAN: {e}")
+            logger.error(f"[MDID PUBLISH] Error publishing MDID: {e}")
+
+    async def _listen_can_responses(self):
+        """
+        Listen for CAN responses and forward them as signed messages to mobile app (Protocol v3 only).
+        """
+        logger.info("[PROTOCOL V3] Starting CAN response listener...")
+        while True:
+            try:
+                msg = await self.sub_socket.recv_string()
+                topic, payload = msg.split(" ", 1)
+                
+                if topic == "canToBle":
+                    logger.info(f"[CAN RESPONSE] Received: {payload}")
+                    try:
+                        data_dict = json.loads(payload)
+                        can_data = data_dict.get("data", [])
+                        
+                        if len(can_data) >= 2:
+                            # Extract opcode from CAN response
+                            opcode = (can_data[0] << 8) | can_data[1]
+                            response_data = can_data[2:] if len(can_data) > 2 else []
+                            
+                            # Send signed SUCCESS response with CAN data
+                            tosend = self._set_response_data_v3(opcode, OpskyCommands.SUCCESS.value, response_data)
+                            logger.info(f"[BLE TX] Signed CAN response: {' '.join(f'{b:02X}' for b in tosend)}")
+                            self.send_machine.changed(bytes(tosend))
+                        else:
+                            logger.warning(f"[CAN RESPONSE] Insufficient data in response: {can_data}")
+                            
+                    except Exception as e:
+                        logger.error(f"[CAN RESPONSE] Error processing response: {e}")
+                        
+            except Exception as e:
+                logger.error(f"[CAN RESPONSE] Error receiving ZMQ message: {e}")
+                await asyncio.sleep(0.5)
 
     def _load_ble_adv_name(self):
         """Load BLE advertising name from config.json"""
@@ -223,6 +261,33 @@ class OpskyService(Service):
         temp.extend(list(opcode.to_bytes(2, byteorder=BYTEORDER)))
         temp.extend(data)
         return temp
+
+    def _set_response_data_v3(self, opcode, response, data):
+        """
+        Format signed response for Protocol v3: [SIG_LEN][SIGNATURE][RESPONSE_CODE][OPCODE][DATA]
+        Signs the [RESPONSE_CODE][OPCODE][DATA] content.
+        """
+        try:
+            from ecdsa_utils import sign_data
+            
+            # Prepare the data to sign: [RESPONSE_CODE][OPCODE][DATA]
+            response_bytes = response.to_bytes(2, byteorder=BYTEORDER)
+            opcode_bytes = opcode.to_bytes(2, byteorder=BYTEORDER)
+            
+            data_to_sign = list(response_bytes) + list(opcode_bytes) + data
+            
+            # Sign the data
+            signature = sign_data(bytes(data_to_sign))
+            sig_length = len(signature)
+            
+            # Format: [SIG_LEN][SIGNATURE][RESPONSE_CODE][OPCODE][DATA]
+            result = [sig_length] + list(signature) + data_to_sign
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error signing Protocol v3 response: {e}")
+            # Fallback to unsigned response
+            return self._set_response_data(opcode, response, data)
 
     def _set_unsolicited_opcode_notification_data(self, opcode, response, data):
         """
@@ -406,27 +471,72 @@ class OpskyService(Service):
                     logger.info(f"[OPSKY_BLE]: Pending response sent on BLE {tosend}")
             elif self.protocol_version == 3:
                 from ecdsa_utils import verify_signature, verify_opcode_signature_v3
+                
+                # Protocol v3: No header, extract opcode from data
+                # Authentication: [SIG_LEN][SIGNATURE_OF_OPCODE+MDID][OPCODE][MDID]
+                # Commands: [SIG_LEN][SIGNATURE_OF_OPCODE][OPCODE]
+                
                 if self.session_state != BLESessionState.AUTHENTICATED:
-                    if len(data) < 6 + 8:  # 6 bytes MDID + minimal DER signature
-                        logger.warning(f"[PROTOCOL V3] Data too short for MDID+signature. Got {len(data)} bytes.")
-                        tosend = self._set_response_data(opcode, OpskyCommands.ERROR.value, [0x00])
+                    # Authentication: [SIG_LEN][SIGNATURE_OF_OPCODE+MDID][OPCODE][MDID]
+                    if len(data) < 1:  # Need at least signature length byte
+                        logger.warning(f"[PROTOCOL V3] No signature length byte")
+                        tosend = self._set_response_data_v3(OpskyCommands.SET_OPID.value, OpskyCommands.ERROR.value, [0x00])
                         logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
                         self.send_machine.changed(bytes(tosend))
+                        if self.connection_monitor and self.connectedDevice:
+                            asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
                         return
-                    mdid = bytes(data[:6])
-                    signature = bytes(data[6:])  # Convert signature list to bytes
-                    if verify_signature(mdid, signature):
+                    
+                    sig_length = data[0]
+                    if sig_length == 0:
+                        logger.warning(f"[PROTOCOL V3] Zero signature length")
+                        tosend = self._set_response_data_v3(OpskyCommands.SET_OPID.value, OpskyCommands.ERROR.value, [0x00])
+                        logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
+                        self.send_machine.changed(bytes(tosend))
+                        if self.connection_monitor and self.connectedDevice:
+                            asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
+                        return
+                    
+                    if len(data) < 1 + sig_length + 2 + 6:  # sig_len + signature + opcode + mdid
+                        logger.warning(f"[PROTOCOL V3] Insufficient data: need {1+sig_length+2+6}, got {len(data)}")
+                        tosend = self._set_response_data_v3(OpskyCommands.SET_OPID.value, OpskyCommands.ERROR.value, [0x00])
+                        logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
+                        self.send_machine.changed(bytes(tosend))
+                        if self.connection_monitor and self.connectedDevice:
+                            asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
+                        return
+                    
+                    signature = bytes(data[1:1+sig_length])
+                    auth_opcode_bytes = data[1+sig_length:1+sig_length+2]
+                    mdid = bytes(data[1+sig_length+2:1+sig_length+2+6])
+                    
+                    # Extract actual opcode from data (no header in v3)
+                    opcode = int.from_bytes(auth_opcode_bytes, byteorder=BYTEORDER)
+                    
+                    # Only SET_OPID (0x0001) is allowed for authentication
+                    if opcode != OpskyCommands.SET_OPID.value:
+                        logger.warning(f"[PROTOCOL V3] Invalid authentication opcode: {opcode:04X}")
+                        tosend = self._set_response_data_v3(opcode, OpskyCommands.ERROR.value, [0x00])
+                        logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
+                        self.send_machine.changed(bytes(tosend))
+                        if self.connection_monitor and self.connectedDevice:
+                            asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
+                        return
+                    
+                    # Verify signature of [opcode + mdid]
+                    opcode_mdid_data = auth_opcode_bytes + list(mdid)
+                    if verify_signature(bytes(opcode_mdid_data), signature):
                         self.session_state = BLESessionState.AUTHENTICATED
-                        self.authenticated_mdid = mdid  # Store for future commands
-                        logger.info(f"[PROTOCOL V3] MDID {mdid.hex().upper()} signature verified. User authenticated!")
-                        tosend = self._set_response_data(opcode, OpskyCommands.SUCCESS.value, [0x01])
+                        self.authenticated_mdid = mdid
+                        logger.info(f"[PROTOCOL V3] MDID {mdid.hex().upper()} authenticated")
+                        tosend = self._set_response_data_v3(opcode, OpskyCommands.SUCCESS.value, [0x01])
                         logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
                         self.send_machine.changed(bytes(tosend))
                         self.servicestate = AuthState.USER_AUTHENTICATED
-                        # Publish authenticated status to ZMQ immediately
+                        
+                        # Publish authenticated status to ZMQ
                         try:
                             device_path = self.connectedDevice if self.connectedDevice else "unknown"
-                            import json
                             auth_msg = json.dumps({"status": "authenticated", "device": device_path})
                             self.pub_socket.send_string(f"bleStatus {auth_msg}")
                             logger.info(f"Published BLE status: {auth_msg}")
@@ -437,121 +547,63 @@ class OpskyService(Service):
                         mdid_hex = mdid.hex().upper()
                         self._publish_mdid_to_can(mdid_hex)
                     else:
-                        logger.warning(f"[PROTOCOL V3] Signature verification failed for MDID {mdid.hex().upper()}")
-                        tosend = self._set_response_data(opcode, OpskyCommands.ERROR.value, [0x00])
+                        logger.warning(f"[PROTOCOL V3] Signature verification failed")
+                        tosend = self._set_response_data_v3(opcode, OpskyCommands.ERROR.value, [0x00])
                         logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
                         self.send_machine.changed(bytes(tosend))
-                        # TODO: Add unsolicited event for failed signature verification (like Protocol v2)
-                        # This would improve error handling consistency between protocols
                         if self.connection_monitor and self.connectedDevice:
-                            logger.info("Disconnecting BLE device due to failed signature verification.")
                             asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
                     return
                 else:
-                    # After authentication, expect: OPCODE (already extracted) + DATA contains PAYLOAD + SIGNATURE
-                    # Most requests are just OPCODE + SIGNATURE (no payload in data)
-                    if len(data) < 8:  # Minimal DER signature
-                        logger.warning(f"[PROTOCOL V3] Data too short for signature. Got {len(data)} bytes.")
-                        # TODO: Consider sending ERROR response instead of silent return for better debugging
-                        # Current silent behavior prioritizes security but makes debugging harder
-                        # Note: No response sent - just return on insufficient data
-                        return
-
-                    logger.info(f"[PROTOCOL V3] Parsing opcode 0x{opcode:04X}, data length: {len(data)}")
-
-                    # For most commands, data contains only DER signature (starts with 0x30)
-                    # Check if data starts with DER signature (0x30)
-                    if len(data) > 0 and data[0] == 0x30:
-                        # Parse DER length to verify this is a complete signature
-                        if len(data) > 1:
-                            length_byte = data[1]
-                            if length_byte & 0x80 == 0:
-                                # Short form DER length
-                                der_length = length_byte
-                                header_size = 2  # 0x30 + length byte
-                                if header_size + der_length == len(data):
-                                    # Data contains only DER signature (no payload)
-                                    payload = bytes()  # Empty payload
-                                    signature = bytes(data)
-                                    logger.info(f"[PROTOCOL V3] Opcode: 0x{opcode:04X}, Empty payload, Signature length: {len(signature)}")
-
-                                    if verify_opcode_signature_v3(opcode, payload, signature, self.authenticated_mdid.hex()):
-                                        logger.info(f"[PROTOCOL V3] Opcode {opcode:04X} signature verified for MDID {self.authenticated_mdid.hex().upper()}.")
-                                        # Forward verified command to CAN system
-                                        self._forward_command_to_can(opcode, payload)
-                                        # Send PENDING response like Protocol v2
-                                        tosend = self._set_response_data(opcode, OpskyCommands.PENDING.value, [])
-                                        logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
-                                        self.send_machine.changed(bytes(tosend))
-                                        logger.info(f"[OPSKY_BLE]: Pending response sent on BLE {tosend}")
-                                        return
-                                    else:
-                                        logger.warning(f"[PROTOCOL V3] Opcode signature verification failed for MDID {self.authenticated_mdid.hex().upper()}.")
-                                        # TODO: Consider sending ERROR response before disconnect for better debugging
-                                        # Current silent behavior prioritizes security but makes debugging harder
-                                        # Note: No response sent - just disconnect on signature failure
-                                        if self.connection_monitor and self.connectedDevice:
-                                            logger.info("Disconnecting BLE device due to failed opcode signature.")
-                                            asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
-                                        return
-
-                    # Fallback: Look for DER signature anywhere in the data (for commands with payload)
-                    logger.info(f"[PROTOCOL V3] Data doesn't start with DER signature, searching for payload+signature split...")
-                    signature_start = -1
-                    for i in range(0, len(data)):
-                        if data[i] == 0x30:  # DER SEQUENCE tag
-                            # Parse DER length (can be 1 byte or multi-byte)
-                            if i + 1 < len(data):
-                                length_byte = data[i + 1]
-                                if length_byte & 0x80 == 0:
-                                    # Short form: length is in the single byte
-                                    der_length = length_byte
-                                    header_size = 2  # 0x30 + length byte
-                                else:
-                                    # Long form: length is in multiple bytes
-                                    length_bytes = length_byte & 0x7F
-                                    if i + 1 + length_bytes < len(data):
-                                        der_length = 0
-                                        for j in range(length_bytes):
-                                            der_length = (der_length << 8) + data[i + 2 + j]
-                                        header_size = 2 + length_bytes  # 0x30 + length encoding
-                                    else:
-                                        continue  # Not enough bytes for length encoding
-
-                                # Verify the DER signature length matches remaining data
-                                if i + header_size + der_length == len(data):
-                                    signature_start = i
-                                    logger.info(f"[PROTOCOL V3] Found valid DER signature at position {i}, length: {der_length}")
-                                    break
-
-                    if signature_start == -1:
-                        logger.warning(f"[PROTOCOL V3] Could not find valid DER signature in data.")
-                        logger.warning(f"[PROTOCOL V3] Searched data: {' '.join(f'{b:02X}' for b in data)}")
-                        # TODO: Consider sending ERROR response instead of silent return for better debugging
-                        # Current silent behavior prioritizes security but makes debugging harder
-                        # Note: No response sent - just return on invalid DER
-                        return
-
-                    payload = bytes(data[:signature_start])
-                    signature = bytes(data[signature_start:])
-                    logger.info(f"[PROTOCOL V3] Opcode: 0x{opcode:04X}, Payload length: {len(payload)}, Signature length: {len(signature)}")
-
-                    if verify_opcode_signature_v3(opcode, payload, signature, self.authenticated_mdid.hex()):
-                        logger.info(f"[PROTOCOL V3] Opcode {opcode:04X} signature verified for MDID {self.authenticated_mdid.hex().upper()}.")
-                        # Forward verified command to CAN system
-                        self._forward_command_to_can(opcode, payload)
-                        # Send PENDING response like Protocol v2
-                        tosend = self._set_response_data(opcode, OpskyCommands.PENDING.value, [])
+                    # Commands: [SIG_LEN][SIGNATURE_OF_OPCODE][OPCODE]  
+                    if len(data) < 3:  # Need at least sig_len + 2 bytes for opcode
+                        logger.warning(f"[PROTOCOL V3] No signature length byte or insufficient data")
+                        tosend = self._set_response_data_v3(0x0000, OpskyCommands.ERROR.value, [0x00])  # Default opcode
                         logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
                         self.send_machine.changed(bytes(tosend))
-                        logger.info(f"[OPSKY_BLE]: Pending response sent on BLE {tosend}")
-                    else:
-                        logger.warning(f"[PROTOCOL V3] Opcode signature verification failed for MDID {self.authenticated_mdid.hex().upper()}.")
-                        # TODO: Consider sending ERROR response before disconnect for better debugging
-                        # Current silent behavior prioritizes security but makes debugging harder
-                        # Note: No response sent - just disconnect on signature failure
                         if self.connection_monitor and self.connectedDevice:
-                            logger.info("Disconnecting BLE device due to failed opcode signature.")
+                            asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
+                        return
+                    
+                    sig_length = data[0]
+                    if len(data) < 1 + sig_length + 2:  # sig_len + signature + opcode
+                        logger.warning(f"[PROTOCOL V3] Insufficient command data: need {1+sig_length+2}, got {len(data)}")
+                        # Try to extract opcode if possible for error response
+                        error_opcode = 0x0000
+                        if len(data) >= 3:  # At least sig_len + 2 bytes for opcode
+                            try:
+                                temp_sig_len = data[0] 
+                                if len(data) >= 1 + temp_sig_len + 2:
+                                    error_opcode = int.from_bytes(data[1+temp_sig_len:1+temp_sig_len+2], byteorder=BYTEORDER)
+                            except:
+                                pass
+                        tosend = self._set_response_data_v3(error_opcode, OpskyCommands.ERROR.value, [0x00])
+                        logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
+                        self.send_machine.changed(bytes(tosend))
+                        if self.connection_monitor and self.connectedDevice:
+                            asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
+                        return
+                    
+                    signature = bytes(data[1:1+sig_length])
+                    cmd_opcode_bytes = data[1+sig_length:1+sig_length+2]
+                    
+                    # Extract actual opcode from data (no header in v3)
+                    opcode = int.from_bytes(cmd_opcode_bytes, byteorder=BYTEORDER)
+                    
+                    # Verify opcode signature
+                    if (self.authenticated_mdid is not None and 
+                        verify_opcode_signature_v3(opcode, bytes(), signature, self.authenticated_mdid.hex())):
+                        logger.info(f"[PROTOCOL V3] Command {opcode:04X} verified")
+                        self._forward_command_to_can(opcode, bytes())
+                        tosend = self._set_response_data_v3(opcode, OpskyCommands.PENDING.value, [])
+                        logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
+                        self.send_machine.changed(bytes(tosend))
+                    else:
+                        logger.warning(f"[PROTOCOL V3] Command signature verification failed")
+                        tosend = self._set_response_data_v3(opcode, OpskyCommands.ERROR.value, [0x00])
+                        logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
+                        self.send_machine.changed(bytes(tosend))
+                        if self.connection_monitor and self.connectedDevice:
                             asyncio.create_task(self.connection_monitor.disconnect_device(self.connectedDevice))
                     return
             else:
@@ -572,8 +624,14 @@ class OpskyService(Service):
         Processes incoming BLE write, extracts opcode/data, and routes to handler.
         """
         try:
-            response_code, opcode, data = self._get_opcode_data(list(value))
-            self._handle_command(response_code, opcode, data)
+            if self.protocol_version == 3:
+                # Protocol v3: No header, pass entire message as data
+                # Opcode will be extracted from within the message data
+                self._handle_command(hack_response, 0, list(value))
+            else:
+                # Protocol v2: Extract opcode from header
+                response_code, opcode, data = self._get_opcode_data(list(value))
+                self._handle_command(response_code, opcode, data)
         except Exception as e:
             logger.error(f"Error in setter: {e}")
 
