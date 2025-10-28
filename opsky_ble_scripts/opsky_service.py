@@ -358,25 +358,27 @@ class OpskyService(Service):
         and handles protocol v2/v3 branching and signature verification.
         """
         try:
-            # Log RX opcode/data in hex (space-separated, capital)
-            rx_bytes = []
-            if response_code != hack_response:
-                rx_bytes += [(response_code >> 8) & 0xFF, response_code & 0xFF]
-            if isinstance(opcode, int):
-                rx_bytes += list(opcode.to_bytes(2, byteorder=BYTEORDER))
-            if isinstance(data, list):
-                rx_bytes += data
-            rx_hex = ' '.join(f'{b:02X}' for b in rx_bytes)
-            logger.info(f"[BLE RX] {rx_hex}")
-            logger.info(f"💡💡 Received opcode {opcode} (Response {response_code if response_code != hack_response else ''})")
-            # Only accept commands if authenticated, except for authentication flow
-            if not (self.session_state == BLESessionState.AUTHENTICATED or 
-                    (self.session_state == BLESessionState.WAITING_FOR_MDID and opcode == OpskyCommands.SET_OPID.value) or
-                    (self.session_state == BLESessionState.AUTH_CHALLENGE_SENT and opcode == OpskyCommands.AUTH_CHALLENGE.value)):
-                logger.warning(f"[BLE RX] Command {opcode} ignored: user not authenticated.")
-                return
-            # Protocol version branching
+            # Protocol version branching - handle v3 differently from v2
             if self.protocol_version == 2:
+                # Log RX opcode/data in hex (space-separated, capital)
+                rx_bytes = []
+                if response_code != hack_response:
+                    rx_bytes += [(response_code >> 8) & 0xFF, response_code & 0xFF]
+                if isinstance(opcode, int):
+                    rx_bytes += list(opcode.to_bytes(2, byteorder=BYTEORDER))
+                if isinstance(data, list):
+                    rx_bytes += data
+                rx_hex = ' '.join(f'{b:02X}' for b in rx_bytes)
+                logger.info(f"[BLE RX] {rx_hex}")
+                logger.info(f"💡💡 Received opcode {opcode} (Response {response_code if response_code != hack_response else ''})")
+                
+                # Only accept commands if authenticated, except for authentication flow
+                if not (self.session_state == BLESessionState.AUTHENTICATED or 
+                        (self.session_state == BLESessionState.WAITING_FOR_MDID and opcode == OpskyCommands.SET_OPID.value) or
+                        (self.session_state == BLESessionState.AUTH_CHALLENGE_SENT and opcode == OpskyCommands.AUTH_CHALLENGE.value)):
+                    logger.warning(f"[BLE RX] Command {opcode} ignored: user not authenticated.")
+                    return
+                
                 if self.session_state == BLESessionState.WAITING_FOR_MDID and opcode == OpskyCommands.SET_OPID.value:
                     self.mdid = data
                     ENFORCE_MDID_LENGTH = True  # Set to True to require exactly 6 bytes
@@ -476,6 +478,10 @@ class OpskyService(Service):
                 # Authentication: [SIG_LEN][SIGNATURE_OF_OPCODE+MDID][OPCODE][MDID]
                 # Commands: [SIG_LEN][SIGNATURE_OF_OPCODE][OPCODE]
                 
+                # Log raw received data first
+                rx_hex = ' '.join(f'{b:02X}' for b in data)
+                logger.info(f"[BLE RX] {rx_hex}")
+                
                 if self.session_state != BLESessionState.AUTHENTICATED:
                     # Authentication: [SIG_LEN][SIGNATURE_OF_OPCODE+MDID][OPCODE][MDID]
                     if len(data) < 1:  # Need at least signature length byte
@@ -512,6 +518,7 @@ class OpskyService(Service):
                     
                     # Extract actual opcode from data (no header in v3)
                     opcode = int.from_bytes(auth_opcode_bytes, byteorder=BYTEORDER)
+                    logger.info(f"💡💡 Received Protocol v3 authentication opcode {opcode:04X}")
                     
                     # Only SET_OPID (0x0001) is allowed for authentication
                     if opcode != OpskyCommands.SET_OPID.value:
@@ -589,6 +596,7 @@ class OpskyService(Service):
                     
                     # Extract actual opcode from data (no header in v3)
                     opcode = int.from_bytes(cmd_opcode_bytes, byteorder=BYTEORDER)
+                    logger.info(f"💡💡 Received Protocol v3 command opcode {opcode:04X}")
                     
                     # Verify opcode signature
                     if (self.authenticated_mdid is not None and 
