@@ -680,33 +680,53 @@ class OpskyService(Service):
     def readwrite_notify_setter(self, value, options):
         """
         UWB/Notification characteristic - on write receives UWB key from mobile.
-        Same implementation as UWB characteristic in v2.
+        Buffers 2 chunks, appends, and forwards only after both are received.
         """
         logger.info(f"[UWB BLE RX] {' '.join(f'{b:02X}' for b in value)}")
         try:
-            # Decode the received UWB key
-            msg = bytes(value).decode('utf-8', errors='ignore').strip()
-            logger.info(f"[UWB BLE] Received UWB key: {msg}")
-
-            # Store the UWB key
-            self.uwb_key = msg
-
-            # Forward UWB key to ZMQ for further processing
-            payload = json.dumps({"UwbKey": msg})
-            zmq_msg = f"uwbKey {payload}"
-            self.pub_socket.send_string(zmq_msg)
-            logger.info(f"[UWB BLE]: UWB key forwarded to ZMQ: {zmq_msg}")
-
-            # Send acknowledgment notification (optional - can be used for errors later)
-            ack_msg = b"UWB_KEY_RECEIVED"
-            #.readwrite_notify_char.changed(ack_msg)
-            logger.info(f"[UWB BLE TX] Notification sent: {ack_msg}")
-
+            # Initialize buffer if not present
+            if not hasattr(self, '_uwb_key_chunks'):
+                self._uwb_key_chunks = []
+            # Buffer chunk
+            chunk = bytes(value)
+            self._uwb_key_chunks.append(chunk)
+            logger.info(f"[UWB BLE] Received UWB key chunk {len(self._uwb_key_chunks)}: {chunk}")
+            # If 2 chunks received, append and forward
+            if len(self._uwb_key_chunks) == 2:
+                full_key = b''.join(self._uwb_key_chunks)
+                self.uwb_key = full_key
+                # Print key in hex
+                logger.info(f"[UWB BLE] Full key (hex): {full_key.hex()}")
+                # Print key as UTF-8 string if possible
+                try:
+                    key_str = full_key.decode('utf-8')
+                    logger.info(f"[UWB BLE] Full key (utf-8): {key_str}")
+                except Exception:
+                    logger.info("[UWB BLE] Full key not valid UTF-8")
+                # Forward UWB key to ZMQ for further processing
+                try:
+                    # Use UTF-8 if possible, else latin1
+                    try:
+                        key_str = full_key.decode('utf-8', errors='ignore').strip()
+                    except Exception:
+                        key_str = full_key.decode('latin1', errors='ignore').strip()
+                    payload = json.dumps({"UwbKey": key_str}, indent=2)
+                    zmq_msg = f"uwbKey {payload}"
+                    self.pub_socket.send_string(zmq_msg)
+                    logger.info(f"[UWB BLE]: UWB key forwarded to ZMQ (pretty):\n{zmq_msg}")
+                except Exception as e:
+                    logger.error(f"[UWB BLE] Error forwarding UWB key to ZMQ: {e}")
+                # Send acknowledgment notification (disabled per request)
+                ack_msg = b"UWB_KEY_RECEIVED"
+                # self.readwrite_notify_char.changed(ack_msg)
+                # logger.info(f"[UWB BLE TX] Notification sent: {ack_msg}")
+                # Clear buffer
+                self._uwb_key_chunks = []
         except Exception as e:
             logger.error(f"[UWB BLE] Error processing UWB key: {e}")
             # Send error notification
             error_msg = b"UWB_KEY_ERROR"
-#           self.readwrite_notify_char.changed(error_msg)
+            self.readwrite_notify_char.changed(error_msg)
             logger.error(f"[UWB BLE TX] Error notification sent: {error_msg}")
 
     def send_custom_notification(self, data):
