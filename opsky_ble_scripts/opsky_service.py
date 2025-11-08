@@ -536,9 +536,9 @@ class OpskyService(Service):
                         self.session_state = BLESessionState.AUTHENTICATED
                         self.authenticated_mdid = mdid
                         logger.info(f"[PROTOCOL V3] MDID {mdid.hex().upper()} authenticated")
-                        tosend = self._set_response_data_v3(opcode, OpskyCommands.SUCCESS.value, [0x01])
-                        logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
-                        self.send_machine.changed(bytes(tosend))
+                        #tosend = self._set_response_data_v3(opcode, OpskyCommands.SUCCESS.value, [0x01])
+                        #logger.info(f"[BLE TX] {' '.join(f'{b:02X}' for b in tosend)}")
+                        #self.send_machine.changed(bytes(tosend))
                         self.servicestate = AuthState.USER_AUTHENTICATED
                         
                         # Publish authenticated status to ZMQ
@@ -699,14 +699,14 @@ class OpskyService(Service):
 
             # Send acknowledgment notification (optional - can be used for errors later)
             ack_msg = b"UWB_KEY_RECEIVED"
-            self.readwrite_notify_char.changed(ack_msg)
+            #.readwrite_notify_char.changed(ack_msg)
             logger.info(f"[UWB BLE TX] Notification sent: {ack_msg}")
 
         except Exception as e:
             logger.error(f"[UWB BLE] Error processing UWB key: {e}")
             # Send error notification
             error_msg = b"UWB_KEY_ERROR"
-            self.readwrite_notify_char.changed(error_msg)
+#           self.readwrite_notify_char.changed(error_msg)
             logger.error(f"[UWB BLE TX] Error notification sent: {error_msg}")
 
     def send_custom_notification(self, data):

@@ -26,11 +26,31 @@ KEYS_DIR = os.path.join(os.path.dirname(__file__), 'keys')
 def get_public_key_for_mdid(mdid_hex: str):
     """
     Given MDID as hex string (e.g. 'FF0000000001'), load the corresponding public key PEM file.
+    Ignores the first 4 characters (2 bytes) if present (e.g., '0001ff0000000001' -> 'ff0000000001').
     """
-    filename = f"public_key_{mdid_hex.lower()}.pem"
+    # Remove first 4 characters if mdid_hex is longer than 12
+    mdid_actual = mdid_hex[4:] if len(mdid_hex) > 12 else mdid_hex
+    # Validation: length and hex format
+    valid = True
+    if len(mdid_actual) != 12:
+        valid = False
+    else:
+        try:
+            int(mdid_actual, 16)
+        except ValueError:
+            valid = False
+    allowed_mdids = {f"ff000000000{i:x}" for i in range(1, 10)}.union({f"ff000000000{i}" for i in 'A B C D E F'.split()})
+    if not valid or mdid_actual.lower() not in allowed_mdids:
+        mdid_actual = "ff0000000001"
+    filename = f"public_key_{mdid_actual.lower()}.pem"
     path = os.path.join(KEYS_DIR, filename)
+        # Fallback: if constructed file does not exist, use default
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Public key file not found for MDID {mdid_hex}: {path}")
+        fallback_path = os.path.join(KEYS_DIR, "public_key_ff0000000001.pem")
+        if os.path.exists(fallback_path):
+            path = fallback_path
+        else:
+            raise FileNotFoundError(f"Public key file not found for MDID {mdid_hex}: {path}")
     with open(path, 'rb') as f:
         pem_data = f.read()
     return load_pem_public_key(pem_data)
@@ -44,10 +64,12 @@ def verify_signature(mdid: bytes, signature: bytes) -> bool:
     """
     logger = logging.getLogger(__name__)
     mdid_hex = mdid.hex()
+    # Remove first 4 chars if present for actual MDID
+    mdid_actual = mdid_hex[4:] if len(mdid_hex) > 12 else mdid_hex
     try:
-        logger.info(f"[ECDSA] Verifying signature for MDID: {mdid_hex.upper()}")
+        logger.info(f"[ECDSA] Verifying signature for MDID: {mdid_hex.upper()} (actual for key lookup: {mdid_actual.upper()})")
         public_key = get_public_key_for_mdid(mdid_hex)
-        logger.info(f"[ECDSA] Loaded public key: public_key_{mdid_hex.lower()}.pem")
+        logger.info(f"[ECDSA] Loaded public key: public_key_{mdid_actual.lower()}.pem")
         logger.info(f"[ECDSA] Message: {mdid.hex().upper()}")
         logger.info(f"[ECDSA] Signature: {signature.hex().upper()}")
         public_key.verify(
@@ -140,13 +162,25 @@ def verify_opcode_signature_v3(opcode: int, payload: bytes, signature: bytes, md
 def get_device_private_key():
     """
     Load the device's private key for signing responses.
-    Uses the first available private key (ff0000000001).
+    Selects the key file based on BLE advertising name in config.json.
     """
-    filename = "private_key_ff0000000001.pem"
+    import json
+    # Load advertising name from config.json
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+    try:
+        with open(CONFIG_PATH) as f:
+            config = json.load(f)
+        adv_name = config.get("ble_adv_name", "OPSKY_DEVICE_DEFAULT")
+    except Exception:
+        adv_name = "OPSKY_DEVICE_DEFAULT"
+    # Normalize adv_name: lowercase, replace non-alnum with _
+    import re
+    adv_name_norm = re.sub(r'[^a-zA-Z0-9]', '_', adv_name).lower()
+    filename = f"private_key_{adv_name_norm}.pem"
     path = os.path.join(KEYS_DIR, filename)
     if not os.path.exists(path):
         raise FileNotFoundError(f"Device private key not found: {path}")
-    
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
     with open(path, 'rb') as f:
         pem_data = f.read()
@@ -162,6 +196,7 @@ def sign_data(data: bytes) -> bytes:
     try:
         logger.info(f"[ECDSA] Signing data: {len(data)} bytes")
         private_key = get_device_private_key()
+
         signature = private_key.sign(data, ec.ECDSA(hashes.SHA256()))
         logger.info(f"[ECDSA] Signature created: {len(signature)} bytes")
         return signature
