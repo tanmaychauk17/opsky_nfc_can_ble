@@ -1,0 +1,115 @@
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          PROTOCOL V3 MESSAGE FORMAT                             │
+│                              (Updated Format)                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────┐                                                 ┌─────────────┐
+│   Mobile    │                                                 │    BLE      │
+│     App     │                                                 │   Service   │
+└─────────────┘                                                 └─────────────┘
+       │                                                               │
+       │  1. Read Protocol Version                                     │
+       │◄──────────────────────────────────────────────────────────────│
+       │                    [0x00][0x03]                               │
+       │                                                               │
+       │  2. Authentication Message                                    │
+       │──────────────────────────────────────────────────────────────►│
+       │  [SIG_LEN][SIGNATURE_OF_OPCODE+MDID][0x00][0x01][MDID]        │
+       │   └sig_len └signature             └opcode └mdid               │
+       │                                                               │
+       │                    3. SUCCESS Response                        │
+       │◄──────────────────────────────────────────────────────────────│
+       │  [SIG_LEN][SIGNATURE][0x00][0x00][0x00][0x01][0x01]           │
+       │   ^sig_len ^signature ^SUCCESS  ^SET_OPID ^success_data       │
+       │                                                               │
+       │  4. Command Message                                           │
+       │──────────────────────────────────────────────────────────────►│
+       │  [SIG_LEN][SIGNATURE_OF_OPCODE][0x00][0x08]                   │
+       │   └sig_len └signature           └opcode                      │
+       │                                                               │
+       │                    5. PENDING Response                        │
+       │◄──────────────────────────────────────────────────────────────│
+       │  [SIG_LEN][SIGNATURE][0xFF][0xFE][0x00][0x08][]               │
+       │   ^sig_len ^signature ^PENDING  ^HORN_CMD ^no_data            │
+       │                                                               │
+       │                    6. CAN Response (when ready)               │
+       │◄──────────────────────────────────────────────────────────────│
+       │  [SIG_LEN][SIGNATURE][0x00][0x00][0x00][0x08][can_data...]    │
+       │   ^sig_len ^signature ^SUCCESS  ^HORN_CMD ^response_data      │
+       │                                                               │
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                             MESSAGE STRUCTURE                                   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌── AUTHENTICATION MESSAGE ──┐
+│                             │
+│ ┌──────────────┐            │
+│ │   SIG_LEN    │            │ ← 1 byte (0-255)
+│ │   1 byte     │            │
+│ └──────────────┘            │
+│ ┌──────────────┐            │
+│ │  SIGNATURE   │            │ ← SIG_LEN bytes
+│ │ (variable)   │            │
+│ └──────────────┘            │
+│ ┌──────────────┐            │
+│ │    OPCODE    │            │ ← 2 bytes
+│ │   2 bytes    │            │
+│ └──────────────┘            │
+│ ┌──────────────┐            │
+│ │     MDID     │            │ ← 6 bytes
+│ │   6 bytes    │            │
+│ └──────────────┘            │
+└─────────────────────────────┘
+
+┌── COMMAND MESSAGE ──┐
+│                      │
+│ ┌───────────┐        │
+│ │  SIG_LEN  │        │ ← 1 byte (0-255)
+│ │  1 byte   │        │
+│ └───────────┘        │
+│ ┌───────────┐        │
+│ │SIGNATURE  │        │ ← SIG_LEN bytes
+│ │(variable) │        │
+│ └───────────┘        │
+│ ┌───────────┐        │
+│ │  OPCODE   │        │ ← 2 bytes
+│ │  2 bytes  │        │
+│ └───────────┘        │
+└──────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            PERFORMANCE COMPARISON                               │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+OLD FORMAT (DER Parsing):               NEW FORMAT (Length Prefix):
+┌─────────────────────────┐             ┌─────────────────────────┐
+│ Search for 0x30 byte    │ O(n)        │ Read length byte        │ O(1)
+│ Parse DER length        │ Complex     │ Direct slice operation  │ Simple
+│ Validate DER structure  │ Multiple    │ Boundary check only     │ Single
+│ Extract signature       │ loops       │ Direct indexing         │ access
+└─────────────────────────┘             └─────────────────────────┘
+      50-200+ CPU cycles                       5-10 CPU cycles
+       Variable timing                         Constant timing
+    ↓ 5-20x SLOWER                         ↑ 5-20x FASTER
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              ERROR HANDLING                                     │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────┐                                                 ┌─────────────┐
+│   Mobile    │              ERROR SCENARIOS:                   │    BLE      │
+│     App     │                                                 │   Service   │
+└─────────────┘              1. No signature length byte       └─────────────┘
+       │                     2. Zero signature length                  │
+       │  Malformed Message  3. Insufficient data                      │
+       │──────────────────► 4. Signature verification failed          │
+       │                     5. Opcode mismatch                        │
+       │                                                               │
+       │                ERROR Response (v3 Signed)                     │
+       │◄──────────────────────────────────────────────────────────────│
+       │  [SIG_LEN][SIGNATURE][0xFF][0xFF][orig_opcode][0x00]          │
+       │   ^sig_len ^signature ^ERROR    ^original    ^error_code      │
+       │                                                               │
+       │                    DISCONNECT                                 │
+       │ ╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳╳ │
