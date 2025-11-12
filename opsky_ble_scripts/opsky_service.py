@@ -705,15 +705,12 @@ class OpskyService(Service):
                     logger.info("[UWB BLE] Full key not valid UTF-8")
                 # Forward UWB key to ZMQ for further processing
                 try:
-                    # Use UTF-8 if possible, else latin1
-                    try:
-                        key_str = full_key.decode('utf-8', errors='ignore').strip()
-                    except Exception:
-                        key_str = full_key.decode('latin1', errors='ignore').strip()
-                    payload = json.dumps({"UwbKey": key_str}, indent=2)
+                    # Convert the raw binary key to a hexadecimal string for safe JSON transport
+                    key_hex_str = full_key.hex()
+                    payload = json.dumps({"UwbKey": key_hex_str}, indent=2)
                     zmq_msg = f"uwbKey {payload}"
                     self.pub_socket.send_string(zmq_msg)
-                    logger.info(f"[UWB BLE]: UWB key forwarded to ZMQ (pretty):\n{zmq_msg}")
+                    logger.info(f"[UWB BLE]: UWB key forwarded to ZMQ as hex:\n{zmq_msg}")
                 except Exception as e:
                     logger.error(f"[UWB BLE] Error forwarding UWB key to ZMQ: {e}")
                 # Send acknowledgment notification (disabled per request)
