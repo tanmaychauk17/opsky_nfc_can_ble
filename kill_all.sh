@@ -6,5 +6,6 @@ pkill -f zmqhub.py
 pkill -f nfc_service.py
 pkill -f can_j1939_service.py
 pkill -f opsky_simulator.py
+pkill -f uwb_service.py
 
 echo "All relevant processes have been terminated."

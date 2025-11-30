@@ -4,3 +4,5 @@ can-j1939>=2.0.12
 RPi.GPIO
 pn532
 zmqhub
+pyserial
+pyserial-asyncio

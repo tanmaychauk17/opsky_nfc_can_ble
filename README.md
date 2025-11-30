@@ -345,6 +345,7 @@ python opsky_simulator.py
 - **SETUP.md**: Detailed hardware setup and wiring instructions
 - **PROTOCOL_V3_FLOW.md**: Complete Protocol Version 3 flow documentation
 - Service-specific documentation in individual Python files
+ - UWB Stack references: see `docs/UWB_STACK_REFERENCES.md` (local PDFs under `/home/admin/uwb-stack`)
 
 ## Security Features
 
