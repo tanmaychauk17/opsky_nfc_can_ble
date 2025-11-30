@@ -41,7 +41,7 @@ async def run_hub():
             while True:
                 try:
                     msg = await xsub.recv_multipart()      # data from publishers
-                    logger.info("[HUB] data frames=", len(msg))
+                    logger.info(f"[HUB] data frames={len(msg)}")
                     await xpub.send_multipart(msg)         # fan out to subscribers
                 except Exception as e:
                     logger.error(f"Coroutine 'forward_data' ha an exception: {e}")
